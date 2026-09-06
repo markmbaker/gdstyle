@@ -8,7 +8,7 @@ extends VBoxContainer
 ##   2. CLI fallback: spawns the gdstyle binary with check --format json.
 ##      Auto-downloads the binary from GitHub Releases if not found.
 
-const GITHUB_REPO := "atelico/gdstyle"
+const GITHUB_REPO := "markmbaker/gdstyle"
 const BIN_DIR := "res://addons/gdstyle/bin"
 const SETTINGS_PATH := "res://addons/gdstyle/settings.json"
 

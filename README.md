@@ -1,16 +1,18 @@
 # gdstyle
 
-[![Crates.io](https://img.shields.io/crates/v/gdstyle.svg)](https://crates.io/crates/gdstyle)
-[![docs.rs](https://img.shields.io/docsrs/gdstyle)](https://docs.rs/gdstyle)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
-[![CI](https://github.com/atelico/gdstyle/actions/workflows/ci.yml/badge.svg)](https://github.com/atelico/gdstyle/actions/workflows/ci.yml)
-[![Build](https://github.com/atelico/gdstyle/actions/workflows/release.yml/badge.svg)](https://github.com/atelico/gdstyle/actions/workflows/release.yml)
+[![CI](https://github.com/markmbaker/gdstyle/actions/workflows/ci.yml/badge.svg)](https://github.com/markmbaker/gdstyle/actions/workflows/ci.yml)
+[![Build](https://github.com/markmbaker/gdstyle/actions/workflows/release.yml/badge.svg)](https://github.com/markmbaker/gdstyle/actions/workflows/release.yml)
 
 <video src="https://github.com/user-attachments/assets/314e0f55-33e2-4365-bef8-87cf4fdaaa1e" controls autoplay loop muted playsinline width="900">
   gdstyle running in the Godot editor: linting, format-on-save, and right-click single-fix on the bottom panel.
 </video>
 
 A fast, opinionated linter and formatter for GDScript (Godot 4.x), built in Rust.
+
+This fork of [atelico/gdstyle](https://github.com/atelico/gdstyle) uses the
+[markmbaker/tree-sitter-gdscript](https://github.com/markmbaker/tree-sitter-gdscript)
+grammar for authoritative syntax validation and declaration analysis.
 
 gdstyle catches style violations, naming inconsistencies, and common code-quality issues, and auto-formats GDScript to the [official Godot style guide](https://docs.godotengine.org/en/stable/tutorials/scripting/gdscript/gdscript_styleguide.html). Many of the conventions are taken from Nathan Lovato and [GDQuest's GDScript style guide](https://gdquest.gitbook.io/gdquests-guidelines).
 
@@ -29,11 +31,13 @@ gdstyle catches style violations, naming inconsistencies, and common code-qualit
 
 ## Installation
 
-Pre-built binaries are available for all major platforms. You don't need a Rust toolchain unless you want to build from source.
+No release has been published from this fork yet. Install the current build
+from Git or build it from source. Tagged releases will provide pre-built
+binaries for all major platforms.
 
-### Pre-built binaries (recommended)
+### Pre-built binaries (after the first fork release)
 
-1. Go to the [latest release](https://github.com/atelico/gdstyle/releases/latest)
+1. Go to the [latest release](https://github.com/markmbaker/gdstyle/releases/latest)
 2. Download the archive for your platform:
    - **Linux**: `gdstyle-x86_64-unknown-linux-gnu.tar.gz`
    - **macOS (Intel)**: `gdstyle-x86_64-apple-darwin.tar.gz`
@@ -52,19 +56,24 @@ cp gdstyle ~/.local/bin/   # or /usr/local/bin/, or anywhere on your PATH
 To build from source you need a [Rust toolchain](https://rustup.rs/).
 
 ```bash
-git clone https://github.com/atelico/gdstyle.git
+git clone --branch codex/tree-sitter-gdscript https://github.com/markmbaker/gdstyle.git
 cd gdstyle
-cargo build --release
+cargo build --release --workspace
 
 # The binary is at target/release/gdstyle
 cp target/release/gdstyle ~/.local/bin/
 ```
 
-### From crates.io
+### Install from Git
 
 ```bash
-cargo install gdstyle
+cargo install --git https://github.com/markmbaker/gdstyle.git \
+  --branch codex/tree-sitter-gdscript
 ```
+
+The fork is intentionally not published under upstream's `gdstyle` crates.io
+name. After the Tree-sitter work lands on the fork's default branch, the
+`--branch` option can be omitted.
 
 ## Quick start
 
@@ -546,7 +555,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install gdstyle
-        run: cargo install gdstyle
+        run: cargo install --git https://github.com/markmbaker/gdstyle.git --branch codex/tree-sitter-gdscript
 
       - name: Check formatting
         run: gdstyle fmt --check
@@ -562,8 +571,8 @@ Add the following to your project's `.pre-commit-config.yaml`:
 
 ```yaml
 repos:
-  - repo: https://github.com/atelico/gdstyle
-    rev: v0.2.5   # pin to a released tag; bump with `pre-commit autoupdate`
+  - repo: https://github.com/markmbaker/gdstyle
+    rev: codex/tree-sitter-gdscript   # replace with a fork release tag when available
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place
@@ -612,8 +621,8 @@ When using `--format json`, gdstyle outputs a JSON array of diagnostics:
 
 ## Using as a library
 
-You can also use gdstyle as a Rust library. Full API docs live at
-[**docs.rs/gdstyle**](https://docs.rs/gdstyle).
+You can also use gdstyle as a Rust library. Its public modules are documented
+in the source and can be rendered locally with `cargo doc --open`.
 
 ```rust
 use gdstyle::config::Config;
@@ -709,13 +718,14 @@ gdstyle fmt examples/
 
 ## Testing
 
-gdstyle has 383 tests: 161 unit tests, 219 integration tests, and 3 doctests.
+gdstyle has 488 tests: 215 library tests, 267 integration tests, 2 GDExtension
+tests, and 4 doctests.
 
 ```bash
-cargo test           # Run all tests
+cargo test --workspace # Run all tests, including the GDExtension
 cargo test --lib     # Unit tests only
 cargo test --test integration_test  # Integration tests only
-cargo clippy         # Lint check
+cargo clippy --workspace --all-targets --all-features # Lint check
 ```
 
 ## Godot editor plugin
@@ -742,7 +752,7 @@ You can switch between backends at any time from the mode dropdown in the toolba
 
 ### Installation (pre-built plugin)
 
-1. Download `gdstyle-godot-plugin.zip` from the [latest release](https://github.com/atelico/gdstyle/releases)
+1. Download `gdstyle-godot-plugin.zip` from the [latest release](https://github.com/markmbaker/gdstyle/releases)
 2. Extract the `addons/gdstyle/` folder into your Godot project
 3. Enable the plugin in **Project > Project Settings > Plugins**
 
@@ -785,8 +795,8 @@ for res_path in style.collect_project_gd_files():
 1. Fork the repository
 2. Create a feature branch: `git checkout -b my-feature`
 3. Write tests first, then implement
-4. Run the full test suite: `cargo test`
-5. Run clippy: `cargo clippy`
+4. Run the full test suite: `cargo test --workspace`
+5. Run clippy: `cargo clippy --workspace --all-targets --all-features`
 6. Commit and push
 7. Open a pull request
 
