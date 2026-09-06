@@ -2,6 +2,8 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::path::Path;
 
+use crate::diagnostic::Severity;
+
 /// Top-level configuration for gdstyle.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
@@ -137,6 +139,16 @@ impl Config {
             None => !Self::OFF_BY_DEFAULT.contains(&rule_name),
         }
     }
+
+    /// Resolve a rule's final severity after applying configuration.
+    pub fn severity_for(&self, rule_name: &str, default: Severity) -> Option<Severity> {
+        match self.rules.get(rule_name) {
+            Some(RuleSeverityConfig::Off) => None,
+            Some(RuleSeverityConfig::Warn) => Some(Severity::Warning),
+            Some(RuleSeverityConfig::Error) => Some(Severity::Error),
+            None => Some(default),
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -220,5 +232,26 @@ include = ["addons/my_plugin"]
         );
         assert!(!config.is_rule_enabled("naming/class-name-pascal-case"));
         assert!(config.is_rule_enabled("naming/function-name-snake-case"));
+    }
+
+    #[test]
+    fn severity_overrides_are_applied() {
+        let mut config = Config::default();
+        config
+            .rules
+            .insert("syntax/parse-error".to_string(), RuleSeverityConfig::Warn);
+        config.rules.insert(
+            "naming/function-name-snake-case".to_string(),
+            RuleSeverityConfig::Error,
+        );
+
+        assert_eq!(
+            config.severity_for("syntax/parse-error", Severity::Error),
+            Some(Severity::Warning)
+        );
+        assert_eq!(
+            config.severity_for("naming/function-name-snake-case", Severity::Warning),
+            Some(Severity::Error)
+        );
     }
 }

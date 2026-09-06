@@ -719,9 +719,14 @@ exclude = [".godot", "addons"]
 # Per-rule severity overrides.
 # Values: "off" (disable), "warn" (warning), "error" (error)
 #
-# All rules are enabled with "warn" severity by default.
-# Uncomment any line below to change its severity.
+# Most rules are enabled with "warn" severity by default. Syntax parse errors
+# use "error"; a few advisory rules documented below are disabled by default.
+# Uncomment any line below to change a rule's severity.
 [rules]
+# --- Syntax ---
+# "syntax/parse-error" = "error"
+# "syntax/lex-error" = "off" # Legacy fallback when parse-error is disabled
+
 # --- Naming ---
 # "naming/class-name-pascal-case" = "warn"
 # "naming/function-name-snake-case" = "warn"

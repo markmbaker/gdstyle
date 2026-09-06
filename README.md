@@ -117,7 +117,7 @@ gdstyle ships with 57 rules organized into five categories. Most rules are enabl
 
 | Rule | Description | Fixable |
 |------|-------------|---------|
-| `syntax/lex-error` | Report lexer errors: unterminated strings, invalid numbers, unexpected characters | - |
+| `syntax/lex-error` | Legacy lexer diagnostics used when `syntax/parse-error` is disabled | - |
 | `syntax/parse-error` | Report syntax errors and missing tokens using the Godot 4.7 Tree-sitter grammar | - |
 
 ### Naming (11 rules)
@@ -340,7 +340,7 @@ When no config file is found, gdstyle uses these defaults:
 | `exclude` | `[".godot", "addons"]` |
 | `include` | `[]` |
 
-Most rules are enabled by default with `warn` severity. Three advisory rules (`quality/type-hint`, `quality/empty-function`, `quality/no-debug-print`) are off by default and must be explicitly enabled.
+Most rules are enabled by default with `warn` severity. `syntax/parse-error` uses `error` severity so invalid GDScript fails checks. Three advisory rules (`quality/type-hint`, `quality/empty-function`, `quality/no-debug-print`) are off by default and must be explicitly enabled.
 
 ## Suppressing diagnostics
 

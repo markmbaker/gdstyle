@@ -50,10 +50,14 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // Run all rules.
     let mut diagnostics = rules::run_all_rules_with_source(&file, &tokens, config, Some(source));
 
-    // Surface lexer errors (unterminated strings, invalid numbers, unexpected
-    // characters). Without this, a syntactically broken file would be
-    // reported as clean: the worst failure mode for a linter.
-    if config.is_rule_enabled("syntax/lex-error") {
+    let parse_errors_enabled = config.is_rule_enabled("syntax/parse-error");
+
+    // The legacy lexer is intentionally incomplete and can reject valid
+    // constructs such as Unicode combining marks, raw-string backslashes, and
+    // the magnitude of i64::MIN before its unary minus is applied. Keep its
+    // diagnostics as a compatibility fallback only when the authoritative
+    // Tree-sitter syntax rule is disabled.
+    if config.is_rule_enabled("syntax/lex-error") && !parse_errors_enabled {
         for token in &tokens {
             if let crate::token::TokenKind::Error(ref message) = token.kind {
                 diagnostics.push(Diagnostic::error(
@@ -71,20 +75,17 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // structure needed by lint rules, so it cannot validate the full language.
     // Tree-sitter reports recoverable syntax failures as ERROR or MISSING
     // nodes, allowing linting to continue and surface every useful diagnostic.
-    if config.is_rule_enabled("syntax/parse-error") {
-        let lexer_error_locations: std::collections::HashSet<(usize, usize)> = diagnostics
-            .iter()
-            .filter(|diagnostic| diagnostic.rule == "syntax/lex-error")
-            .map(|diagnostic| (diagnostic.span.line, diagnostic.span.column))
-            .collect();
+    if parse_errors_enabled {
+        diagnostics.extend(syntax::parse_diagnostics(source, file_path));
+    }
 
-        diagnostics.extend(
-            syntax::parse_diagnostics(source, file_path)
-                .into_iter()
-                .filter(|diagnostic| {
-                    !lexer_error_locations.contains(&(diagnostic.span.line, diagnostic.span.column))
-                }),
-        );
+    // Rules declare their natural severity at the diagnostic site. Apply
+    // project configuration last so both warning→error and error→warning
+    // overrides affect CLI exit status consistently.
+    for diagnostic in &mut diagnostics {
+        if let Some(severity) = config.severity_for(&diagnostic.rule, diagnostic.severity) {
+            diagnostic.severity = severity;
+        }
     }
 
     diagnostics.sort_by_key(|diagnostic| (diagnostic.span.line, diagnostic.span.column));
@@ -331,15 +332,47 @@ func take_damage(amount: int) -> void:
         let source = "var x = \"oops\nvar y = 5\n";
         let config = Config::default();
         let diagnostics = lint_source(source, "test.gd", &config);
-        let lex_errors: Vec<_> = diagnostics
+        let parse_errors: Vec<_> = diagnostics
             .iter()
-            .filter(|d| d.rule == "syntax/lex-error")
+            .filter(|d| d.rule == "syntax/parse-error")
             .collect();
         assert!(
-            !lex_errors.is_empty(),
-            "unterminated string must produce a syntax/lex-error diagnostic"
+            !parse_errors.is_empty(),
+            "unterminated string must produce a syntax/parse-error diagnostic"
         );
-        assert_eq!(lex_errors[0].severity, crate::diagnostic::Severity::Error);
+        assert_eq!(parse_errors[0].severity, crate::diagnostic::Severity::Error);
+    }
+
+    #[test]
+    fn legacy_lexer_errors_remain_available_as_a_fallback() {
+        let source = "var x = \"oops\nvar y = 5\n";
+        let mut config = Config::default();
+        config.rules.insert(
+            "syntax/parse-error".to_string(),
+            crate::config::RuleSeverityConfig::Off,
+        );
+        let diagnostics = lint_source(source, "test.gd", &config);
+
+        assert!(diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.rule == "syntax/lex-error"));
+    }
+
+    #[test]
+    fn configured_rule_severity_changes_diagnostics() {
+        let source = "func takeDamage() -> void:\n\tpass\n";
+        let mut config = Config::default();
+        config.rules.insert(
+            "naming/function-name-snake-case".to_string(),
+            crate::config::RuleSeverityConfig::Error,
+        );
+        let diagnostics = lint_source(source, "test.gd", &config);
+
+        let diagnostic = diagnostics
+            .iter()
+            .find(|diagnostic| diagnostic.rule == "naming/function-name-snake-case")
+            .expect("function naming diagnostic");
+        assert_eq!(diagnostic.severity, crate::diagnostic::Severity::Error);
     }
 
     #[test]

@@ -218,7 +218,7 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
     &[
         (
             "syntax/lex-error",
-            "Report lexer errors (unterminated strings, invalid numbers, bad characters)",
+            "Legacy lexer diagnostics used when Tree-sitter syntax checks are disabled",
         ),
         (
             "syntax/parse-error",
