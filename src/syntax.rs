@@ -11,17 +11,30 @@ use tree_sitter::Node;
 
 const RULE_NAME: &str = "syntax/parse-error";
 
-/// Parse `source` with the pinned Godot 4.7 grammar and return all syntax
-/// diagnostics. Tree-sitter recovers after malformed input, so callers can
-/// still run the remaining lint rules on partially written files.
-pub fn parse_diagnostics(source: &str, file_path: &str) -> Vec<Diagnostic> {
+fn parser() -> tree_sitter::Parser {
     let mut parser = tree_sitter::Parser::new();
     let language = tree_sitter_gdscript::LANGUAGE.into();
     parser
         .set_language(&language)
         .expect("tree-sitter-gdscript language version is incompatible");
+    parser
+}
 
-    let Some(tree) = parser.parse(source, None) else {
+/// Return whether `source` is accepted by the pinned Godot 4.7 grammar.
+///
+/// This is intended for safety checks where callers only need a yes/no result,
+/// such as ensuring a formatter transformation preserves valid syntax.
+pub fn is_valid(source: &str) -> bool {
+    parser()
+        .parse(source, None)
+        .is_some_and(|tree| !tree.root_node().has_error())
+}
+
+/// Parse `source` with the pinned Godot 4.7 grammar and return all syntax
+/// diagnostics. Tree-sitter recovers after malformed input, so callers can
+/// still run the remaining lint rules on partially written files.
+pub fn parse_diagnostics(source: &str, file_path: &str) -> Vec<Diagnostic> {
+    let Some(tree) = parser().parse(source, None) else {
         return vec![Diagnostic::error(
             RULE_NAME,
             "GDScript parsing was cancelled".to_string(),
@@ -110,13 +123,16 @@ func collect(items: Array[String]) -> void:
 		values[item] = []
 "#;
 
+        assert!(is_valid(source));
         assert!(parse_diagnostics(source, "modern.gd").is_empty());
     }
 
     #[test]
     fn reports_invalid_syntax_with_one_based_location() {
-        let diagnostics = parse_diagnostics("func broken( -> void:\n\tpass\n", "broken.gd");
+        let source = "func broken( -> void:\n\tpass\n";
+        let diagnostics = parse_diagnostics(source, "broken.gd");
 
+        assert!(!is_valid(source));
         assert!(!diagnostics.is_empty());
         assert!(diagnostics
             .iter()

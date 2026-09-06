@@ -10,7 +10,9 @@ use crate::token::TokenKind;
 ///
 /// This applies ALL formatting transformations unconditionally, unlike --fix
 /// which only fixes flagged violations. The result is idempotent: formatting
-/// already-formatted source returns it unchanged.
+/// already-formatted source returns it unchanged. Syntax-invalid input is left
+/// unchanged, and a formatting pass is rejected if it would produce invalid
+/// GDScript.
 ///
 /// # Example
 ///
@@ -25,11 +27,22 @@ pub fn format_source(source: &str, config: &Config) -> String {
     // Normalize line endings up front so byte-offset computations don't
     // disagree across passes. See `linter::normalize_line_endings` for the
     // full motivation. Idempotent on LF-only input.
-    let mut result = crate::linter::normalize_line_endings(source);
+    let original = crate::linter::normalize_line_endings(source);
+
+    // Formatting partially written or malformed code can compound parser
+    // recovery mistakes. Preserve it for the editor/user to repair first.
+    if !crate::syntax::is_valid(&original) {
+        return original;
+    }
+
+    let mut result = original.clone();
 
     // Multi-pass: apply formatting until stable (idempotent).
     for _ in 0..5 {
         let formatted = format_pass(&result, config);
+        if !crate::syntax::is_valid(&formatted) {
+            return original;
+        }
         if formatted == result {
             break;
         }
@@ -1889,6 +1902,22 @@ func take_damage(amount: int) -> void:
         let first = format_source(source, &config);
         let second = format_source(&first, &config);
         assert_eq!(first, second, "formatter must be idempotent");
+    }
+
+    #[test]
+    fn syntax_invalid_input_is_not_rewritten() {
+        let source = "func broken( -> void:\r\n\tpass   \r\n";
+        let expected = "func broken( -> void:\n\tpass   \n";
+
+        assert_eq!(format_source(source, &Config::default()), expected);
+    }
+
+    #[test]
+    fn modern_godot_syntax_remains_valid_after_formatting() {
+        let source = "@export var values: Dictionary[String, Array] = {}\n\nfunc collect(items: Array[String]) -> void:\n\tfor item: String in items:\n\t\tvalues[item] = []\n";
+        let formatted = format_source(source, &Config::default());
+
+        assert!(crate::syntax::is_valid(&formatted));
     }
 
     // Regression: a plain `#` comment written directly above a declaration is a
