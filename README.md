@@ -56,7 +56,7 @@ cp gdstyle ~/.local/bin/   # or /usr/local/bin/, or anywhere on your PATH
 To build from source you need a [Rust toolchain](https://rustup.rs/).
 
 ```bash
-git clone --branch codex/tree-sitter-gdscript https://github.com/markmbaker/gdstyle.git
+git clone https://github.com/markmbaker/gdstyle.git
 cd gdstyle
 cargo build --release --workspace
 
@@ -67,13 +67,11 @@ cp target/release/gdstyle ~/.local/bin/
 ### Install from Git
 
 ```bash
-cargo install --git https://github.com/markmbaker/gdstyle.git \
-  --branch codex/tree-sitter-gdscript
+cargo install --git https://github.com/markmbaker/gdstyle.git
 ```
 
 The fork is intentionally not published under upstream's `gdstyle` crates.io
-name. After the Tree-sitter work lands on the fork's default branch, the
-`--branch` option can be omitted.
+name. The Git installation follows the fork's default branch.
 
 ## Quick start
 
@@ -555,7 +553,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Install gdstyle
-        run: cargo install --git https://github.com/markmbaker/gdstyle.git --branch codex/tree-sitter-gdscript
+        run: cargo install --git https://github.com/markmbaker/gdstyle.git
 
       - name: Check formatting
         run: gdstyle fmt --check
@@ -572,7 +570,7 @@ Add the following to your project's `.pre-commit-config.yaml`:
 ```yaml
 repos:
   - repo: https://github.com/markmbaker/gdstyle
-    rev: codex/tree-sitter-gdscript   # replace with a fork release tag when available
+    rev: main   # replace with v0.3.0 after the first fork release
     hooks:
       - id: gdstyle          # lint (fails the commit on diagnostics)
       - id: gdstyle-fmt      # format in place

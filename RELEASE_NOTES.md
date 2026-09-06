@@ -31,11 +31,10 @@ grammar.
 
 ### Install
 
-Until the release tag exists, install the development branch:
+Until the release tag exists, install the default branch:
 
 ```bash
-cargo install --git https://github.com/markmbaker/gdstyle.git \
-  --branch codex/tree-sitter-gdscript
+cargo install --git https://github.com/markmbaker/gdstyle.git
 ```
 
 For a tagged release, download a pre-built CLI archive or
