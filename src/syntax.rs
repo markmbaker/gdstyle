@@ -70,7 +70,7 @@ impl<'source> SyntaxDocument<'source> {
     /// continue to use the native lexer while declaration consumers migrate to
     /// this grammar-backed representation.
     pub fn class_members(&self) -> Vec<ClassMember> {
-        lower_members(self.root_node(), self.source)
+        lower_members(self.root_node(), self.source, true)
     }
 }
 
@@ -164,7 +164,11 @@ fn line_start_offset(source: &str, byte_offset: usize) -> usize {
         .map_or(0, |newline| newline + 1)
 }
 
-fn lower_members(container: Node<'_>, source: &str) -> Vec<ClassMember> {
+fn lower_members(
+    container: Node<'_>,
+    source: &str,
+    include_plain_comments: bool,
+) -> Vec<ClassMember> {
     let mut members = Vec::new();
     let mut pending_annotations = Vec::new();
     let mut cursor = container.walk();
@@ -179,6 +183,17 @@ fn lower_members(container: Node<'_>, source: &str) -> Vec<ClassMember> {
                 }
                 "warning_ignore" | "warning_ignore_start" | "warning_ignore_restore" => {}
                 _ => pending_annotations.push(annotation),
+            }
+            continue;
+        }
+
+        // The native parser allows comments between an annotation and the
+        // declaration it decorates. Preserve that behavior; at file scope the
+        // comment is also emitted as its own member.
+        if child.kind() == "comment" {
+            let is_doc = node_text(child, source).starts_with("##");
+            if is_doc || include_plain_comments {
+                lower_member(child, source, &mut members, Vec::new());
             }
             continue;
         }
@@ -340,7 +355,7 @@ fn lower_member(
             };
             let inner_members = node
                 .child_by_field_name("body")
-                .map_or_else(Vec::new, |body| lower_members(body, source));
+                .map_or_else(Vec::new, |body| lower_members(body, source, false));
             members.push(ClassMember::InnerClass {
                 name: node_text(name_node, source),
                 name_span: span_for_node(name_node, source),
@@ -774,6 +789,22 @@ class Inner extends RefCounted:
                 path.display()
             );
         }
+    }
+
+    #[test]
+    fn comment_does_not_detach_a_pending_annotation() {
+        let source = "@export_category(\"Gameplay\")\n# Movement speed\n@export var speed := 1.0\n";
+        let document = SyntaxDocument::parse(source).expect("parse should not be cancelled");
+        let members = document.class_members();
+
+        assert!(matches!(members[0], ClassMember::Comment { .. }));
+        assert!(matches!(
+            &members[1],
+            ClassMember::Variable { name, annotations, .. }
+                if name == "speed"
+                    && annotations.iter().map(|annotation| annotation.name.as_str()).collect::<Vec<_>>()
+                        == ["export_category", "export"]
+        ));
     }
 
     fn clear_body_line_counts(members: &mut [ClassMember]) {

@@ -648,12 +648,13 @@ gdstyle/
 │   ├── main.rs              # CLI entry point (clap subcommands)
 │   ├── lib.rs               # Library root
 │   ├── token.rs             # Token types (Span, TokenKind, Token)
-│   ├── lexer.rs             # Tokenizer (indentation-aware, GDScript 4.x)
-│   ├── ast.rs               # AST node types for linting
-│   ├── parser.rs            # Lightweight parser (just enough for linting)
+│   ├── lexer.rs             # Token stream retained for formatting and fixes
+│   ├── ast.rs               # Declaration model consumed by lint rules
+│   ├── parser.rs            # Legacy declaration-parser fallback
+│   ├── syntax.rs            # Tree-sitter validation and declaration projection
 │   ├── diagnostic.rs        # Diagnostic, Fix, and Replacement types
 │   ├── config.rs            # TOML configuration loading
-│   ├── linter.rs            # Main lint pipeline (tokenize -> parse -> rules -> filter)
+│   ├── linter.rs            # Main lint pipeline (syntax tree + tokens -> rules -> filter)
 │   ├── reporter.rs          # Text and JSON output formatting
 │   ├── fixer.rs             # Auto-fix engine (applies replacements)
 │   ├── formatter.rs         # Multi-pass formatter
@@ -682,6 +683,11 @@ gdstyle/
 ├── Cargo.toml
 └── gdstyle.example.toml
 ```
+
+The linter parses each file once with the pinned `tree-sitter-gdscript`
+grammar. Declaration-based rules consume a projection of that concrete syntax
+tree, while formatting rules and autofixes retain gdstyle's token stream for
+precise trivia and replacement handling.
 
 ## Examples
 

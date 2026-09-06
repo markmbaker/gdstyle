@@ -28,13 +28,25 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // Check for inline suppression comments.
     let suppressed_lines = parse_suppression_comments(source);
 
+    // Parse the full language once. Declaration-based rules use the
+    // Tree-sitter projection below, and syntax diagnostics reuse this same
+    // tree instead of paying for a second parse.
+    let syntax_document = syntax::SyntaxDocument::parse(source);
+
     // Tokenize.
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
 
-    // Parse.
-    let mut parser = Parser::new(&tokens);
-    let members = parser.parse();
+    // Project declarations from the authoritative grammar. Retain the native
+    // parser only as an effectively unreachable fallback for a cancelled
+    // Tree-sitter parse; token-based rules and fixes still use the lexer.
+    let members = syntax_document.as_ref().map_or_else(
+        || {
+            let mut parser = Parser::new(&tokens);
+            parser.parse()
+        },
+        syntax::SyntaxDocument::class_members,
+    );
 
     // Build the script file representation.
     // Use split('\n') instead of lines() to preserve trailing newline detection.
@@ -76,7 +88,10 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     // Tree-sitter reports recoverable syntax failures as ERROR or MISSING
     // nodes, allowing linting to continue and surface every useful diagnostic.
     if parse_errors_enabled {
-        diagnostics.extend(syntax::parse_diagnostics(source, file_path));
+        diagnostics.extend(syntax_document.as_ref().map_or_else(
+            || syntax::parse_diagnostics(source, file_path),
+            |document| document.diagnostics(file_path),
+        ));
     }
 
     // Rules declare their natural severity at the diagnostic site. Apply
