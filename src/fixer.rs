@@ -95,11 +95,19 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     let has_crlf = source.contains('\r');
     let normalized = crate::linter::normalize_line_endings(source);
     let source = normalized.as_str();
+    let syntax_document = crate::syntax::SyntaxDocument::parse(source);
+    let input_was_valid = syntax_document
+        .as_ref()
+        .is_some_and(crate::syntax::SyntaxDocument::is_valid);
 
-    // Single tokenize + parse pass for everything we need below.
+    // Keep the token stream for context-aware reference rewriting, while
+    // declaration metadata comes from the authoritative syntax document.
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
-    let members = GdParser::new(&tokens).parse();
+    let members = syntax_document.as_ref().map_or_else(
+        || GdParser::new(&tokens).parse(),
+        crate::syntax::SyntaxDocument::class_members,
+    );
     let class_name = extract_class_name(&members);
     let existing_names = collect_existing_names(&members);
     let identifier_tokens = collect_identifier_tokens(&tokens);
@@ -195,6 +203,11 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
         source.to_string()
     } else {
         apply_replacements(source, replacements)
+    };
+    let fixed = if input_was_valid && !crate::syntax::is_valid(&fixed) {
+        source.to_string()
+    } else {
+        fixed
     };
 
     if has_crlf {
@@ -443,7 +456,12 @@ pub fn apply_cross_file_fixes(source: &str, refs: &[CrossFileReference]) -> Stri
             new_text: r.new_name.clone(),
         })
         .collect();
-    apply_replacements_no_collapse(source, replacements)
+    let fixed = apply_replacements_no_collapse(source, replacements);
+    if crate::syntax::is_valid(source) && !crate::syntax::is_valid(&fixed) {
+        source.to_string()
+    } else {
+        fixed
+    }
 }
 
 /// A scene-file connection reference that an `--unsafe-fix` rename should
@@ -1061,9 +1079,9 @@ mod tests {
     #[test]
     fn apply_single_replacement() {
         let source = "var x = 5; var y = 10\n";
-        let diags = vec![make_diag(9, 1, "\nvar y = 10", true)];
+        let diags = vec![make_diag(9, 2, "\n", true)];
         let result = apply_fixes(source, &diags, true);
-        assert_eq!(result, "var x = 5\nvar y = 10 var y = 10\n");
+        assert_eq!(result, "var x = 5\nvar y = 10\n");
     }
 
     #[test]
@@ -1124,6 +1142,31 @@ mod tests {
         let diags: Vec<Diagnostic> = vec![];
         let result = apply_fixes(source, &diags, true);
         assert_eq!(result, source);
+    }
+
+    #[test]
+    fn rejects_a_fix_that_would_break_valid_syntax() {
+        let source = "var value: int = 5\n";
+        let diagnostics = vec![make_diag(4, "value".len(), "(", true)];
+
+        assert_eq!(apply_fixes(source, &diagnostics, true), source);
+    }
+
+    #[test]
+    fn rejects_a_cross_file_rename_that_would_break_valid_syntax() {
+        let source = "var value: int = 5\n";
+        let references = vec![CrossFileReference {
+            file: "test.gd".to_string(),
+            line: 1,
+            column: 5,
+            old_name: "value".to_string(),
+            new_name: "(".to_string(),
+            source_file: "source.gd".to_string(),
+            offset: 4,
+            length: "value".len(),
+        }];
+
+        assert_eq!(apply_cross_file_fixes(source, &references), source);
     }
 
     // Regression test for https://github.com/atelico/gdstyle/issues/24:

@@ -5,9 +5,7 @@ use gdstyle::collect::{collect_gdscript_files, collect_scene_files, PathFilter};
 use gdstyle::config::Config;
 use gdstyle::diagnostic::{Diagnostic, Severity};
 use gdstyle::fixer;
-use gdstyle::lexer::Lexer;
 use gdstyle::linter;
-use gdstyle::parser::Parser as GdParser;
 use gdstyle::reporter::{self, OutputFormat};
 use gdstyle::rules;
 use rayon::prelude::*;
@@ -16,9 +14,13 @@ use std::process;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 fn parse_members(source: &str) -> Vec<ClassMember> {
-    let mut lexer = Lexer::new(source);
+    if let Some(document) = gdstyle::syntax::SyntaxDocument::parse(source) {
+        return document.class_members();
+    }
+
+    let mut lexer = gdstyle::lexer::Lexer::new(source);
     let tokens = lexer.tokenize();
-    GdParser::new(&tokens).parse()
+    gdstyle::parser::Parser::new(&tokens).parse()
 }
 
 #[derive(Parser)]
