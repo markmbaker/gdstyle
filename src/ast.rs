@@ -1,7 +1,7 @@
 use crate::token::Span;
 
 /// Represents a parsed GDScript file with just enough structure for linting.
-#[derive(Debug)]
+#[derive(Debug, PartialEq, Eq)]
 pub struct ScriptFile {
     pub path: String,
     pub members: Vec<ClassMember>,
@@ -9,7 +9,7 @@ pub struct ScriptFile {
 }
 
 /// A member of a class (top-level or inner class).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ClassMember {
     ToolAnnotation {
         span: Span,
@@ -279,20 +279,20 @@ fn is_virtual_method(name: &str) -> bool {
     )
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Parameter {
     pub name: String,
     pub type_hint: Option<String>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EnumMember {
     pub name: String,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AnnotationInfo {
     pub name: String,
     pub span: Span,
