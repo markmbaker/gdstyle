@@ -7,7 +7,7 @@
 
 use crate::diagnostic::Diagnostic;
 use crate::token::Span;
-use tree_sitter::Node;
+use tree_sitter::{Node, Tree};
 
 const RULE_NAME: &str = "syntax/parse-error";
 
@@ -20,21 +20,62 @@ fn parser() -> tree_sitter::Parser {
     parser
 }
 
+/// A parsed GDScript syntax tree paired with the source bytes it describes.
+///
+/// Keeping these together gives declaration analysis, diagnostics, and future
+/// syntax-aware fixes one authoritative parse instead of making each consumer
+/// invoke Tree-sitter independently.
+pub struct SyntaxDocument<'source> {
+    source: &'source str,
+    tree: Tree,
+}
+
+impl<'source> SyntaxDocument<'source> {
+    /// Parse a source string. `None` is only possible if Tree-sitter parsing is
+    /// cancelled; gdstyle does not currently configure a cancellation flag.
+    pub fn parse(source: &'source str) -> Option<Self> {
+        parser()
+            .parse(source, None)
+            .map(|tree| Self { source, tree })
+    }
+
+    /// Return the original source associated with the syntax tree.
+    pub fn source(&self) -> &'source str {
+        self.source
+    }
+
+    /// Return the root node of the parsed syntax tree.
+    pub fn root_node(&self) -> Node<'_> {
+        self.tree.root_node()
+    }
+
+    /// Return whether the document contains no recovered syntax errors or
+    /// missing tokens.
+    pub fn is_valid(&self) -> bool {
+        !self.root_node().has_error()
+    }
+
+    /// Convert recovered Tree-sitter errors into gdstyle diagnostics.
+    pub fn diagnostics(&self, file_path: &str) -> Vec<Diagnostic> {
+        let mut diagnostics = Vec::new();
+        collect_errors(self.root_node(), self.source, file_path, &mut diagnostics);
+        diagnostics
+    }
+}
+
 /// Return whether `source` is accepted by the pinned Godot 4.7 grammar.
 ///
 /// This is intended for safety checks where callers only need a yes/no result,
 /// such as ensuring a formatter transformation preserves valid syntax.
 pub fn is_valid(source: &str) -> bool {
-    parser()
-        .parse(source, None)
-        .is_some_and(|tree| !tree.root_node().has_error())
+    SyntaxDocument::parse(source).is_some_and(|document| document.is_valid())
 }
 
 /// Parse `source` with the pinned Godot 4.7 grammar and return all syntax
 /// diagnostics. Tree-sitter recovers after malformed input, so callers can
 /// still run the remaining lint rules on partially written files.
 pub fn parse_diagnostics(source: &str, file_path: &str) -> Vec<Diagnostic> {
-    let Some(tree) = parser().parse(source, None) else {
+    let Some(document) = SyntaxDocument::parse(source) else {
         return vec![Diagnostic::error(
             RULE_NAME,
             "GDScript parsing was cancelled".to_string(),
@@ -43,9 +84,7 @@ pub fn parse_diagnostics(source: &str, file_path: &str) -> Vec<Diagnostic> {
         )];
     };
 
-    let mut diagnostics = Vec::new();
-    collect_errors(tree.root_node(), source, file_path, &mut diagnostics);
-    diagnostics
+    document.diagnostics(file_path)
 }
 
 fn collect_errors(
@@ -123,6 +162,10 @@ func collect(items: Array[String]) -> void:
 		values[item] = []
 "#;
 
+        let document = SyntaxDocument::parse(source).expect("parse should not be cancelled");
+        assert_eq!(document.source(), source);
+        assert_eq!(document.root_node().kind(), "source");
+        assert!(document.is_valid());
         assert!(is_valid(source));
         assert!(parse_diagnostics(source, "modern.gd").is_empty());
     }
