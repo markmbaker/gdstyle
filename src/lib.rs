@@ -16,4 +16,5 @@ pub mod linter;
 pub mod parser;
 pub mod reporter;
 pub mod rules;
+pub mod syntax;
 pub mod token;

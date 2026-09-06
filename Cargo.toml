@@ -20,6 +20,8 @@ colored = "2"
 globset = "0.4"
 serde_json = "1"
 rayon = "1"
+tree-sitter = "0.24.7"
+tree-sitter-gdscript = { git = "https://github.com/markmbaker/tree-sitter-gdscript.git", rev = "80901f8f9659ca20069cc551fd95d196a7822b14" }
 
 [dev-dependencies]
 pretty_assertions = "1"

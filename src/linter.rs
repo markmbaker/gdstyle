@@ -4,6 +4,7 @@ use crate::diagnostic::Diagnostic;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::rules;
+use crate::syntax;
 
 /// Lint a single GDScript source string and return diagnostics.
 ///
@@ -64,6 +65,29 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
             }
         }
     }
+
+    // Run the complete Godot 4.7 Tree-sitter grammar in addition to gdstyle's
+    // lightweight lexer/parser. The latter intentionally extracts only the
+    // structure needed by lint rules, so it cannot validate the full language.
+    // Tree-sitter reports recoverable syntax failures as ERROR or MISSING
+    // nodes, allowing linting to continue and surface every useful diagnostic.
+    if config.is_rule_enabled("syntax/parse-error") {
+        let lexer_error_locations: std::collections::HashSet<(usize, usize)> = diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.rule == "syntax/lex-error")
+            .map(|diagnostic| (diagnostic.span.line, diagnostic.span.column))
+            .collect();
+
+        diagnostics.extend(
+            syntax::parse_diagnostics(source, file_path)
+                .into_iter()
+                .filter(|diagnostic| {
+                    !lexer_error_locations.contains(&(diagnostic.span.line, diagnostic.span.column))
+                }),
+        );
+    }
+
+    diagnostics.sort_by_key(|diagnostic| (diagnostic.span.line, diagnostic.span.column));
 
     // Filter out suppressed diagnostics.
     diagnostics.retain(|d| !is_suppressed(d, &suppressed_lines));

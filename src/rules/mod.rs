@@ -221,6 +221,10 @@ pub fn all_rules() -> &'static [(&'static str, &'static str)] {
             "Report lexer errors (unterminated strings, invalid numbers, bad characters)",
         ),
         (
+            "syntax/parse-error",
+            "Report GDScript syntax errors detected by Tree-sitter",
+        ),
+        (
             "naming/class-name-pascal-case",
             "Class names must use PascalCase",
         ),
