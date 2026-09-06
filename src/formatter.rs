@@ -219,9 +219,7 @@ struct MemberUnit {
 /// than the AST's `end_line()` (which under-counts multi-line bodies for
 /// enums and computed properties).
 fn normalize_member_spacing(source: &str) -> String {
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let members = Parser::new(&tokens).parse();
+    let members = parse_members(source);
     if members.is_empty() {
         return source.to_string();
     }
@@ -1157,6 +1155,10 @@ fn safe_reorder_class_members(source: &str) -> String {
 }
 
 fn parse_members(source: &str) -> Vec<ClassMember> {
+    if let Some(document) = crate::syntax::SyntaxDocument::parse(source) {
+        return document.class_members();
+    }
+
     let mut lexer = Lexer::new(source);
     let tokens = lexer.tokenize();
     Parser::new(&tokens).parse()
@@ -1403,9 +1405,7 @@ fn compute_attached_starts(merged: &[Anchor], lines: &[&str]) -> Vec<usize> {
 /// to the first member: function bodies, multi-line expressions, inner
 /// class bodies are all captured correctly.
 fn reorder_class_members(source: &str) -> String {
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.tokenize();
-    let members = Parser::new(&tokens).parse();
+    let members = parse_members(source);
 
     let lines: Vec<&str> = source.split('\n').collect();
     let merged = collect_member_anchors(&members, &lines);

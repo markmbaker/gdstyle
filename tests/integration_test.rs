@@ -2172,6 +2172,25 @@ fn fmt_reorder_with_enum_and_doc_comments() {
     assert_eq!(formatted, second, "must be idempotent");
 }
 
+#[test]
+fn fmt_keeps_doc_comments_tight_to_consecutive_enums() {
+    let source = "extends Node\n\n# --- Enums ---\n\n## First mode\nenum First { A }\n\n## Second mode\nenum Second { B }\n";
+    let formatted = formatter::format_source(source, &default_config());
+
+    assert!(
+        formatted.contains("# --- Enums ---\n\n## First mode\nenum First"),
+        "section and declaration docs should retain their roles:\n{formatted}"
+    );
+    assert!(
+        formatted.contains("}\n## Second mode\nenum Second"),
+        "the second doc block must stay attached to its enum:\n{formatted}"
+    );
+    assert_eq!(
+        formatter::format_source(&formatted, &default_config()),
+        formatted
+    );
+}
+
 // Fix A: doc comments attached to next declaration are not ordering violations
 
 #[test]
