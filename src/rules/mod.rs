@@ -20,6 +20,26 @@ pub fn run_all_rules_with_source(
     config: &Config,
     source: Option<&str>,
 ) -> Vec<Diagnostic> {
+    let owned_source;
+    let source = match source {
+        Some(source) => source,
+        None => {
+            owned_source = file.lines.join("\n");
+            &owned_source
+        }
+    };
+    let document = crate::syntax::SyntaxDocument::parse(source);
+    run_all_rules_with_document(file, tokens, config, Some(source), document.as_ref())
+}
+
+/// Reuse the linter's syntax tree for structural quality checks.
+pub(crate) fn run_all_rules_with_document(
+    file: &ScriptFile,
+    tokens: &[Token],
+    config: &Config,
+    source: Option<&str>,
+    document: Option<&crate::syntax::SyntaxDocument<'_>>,
+) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Naming rules.
@@ -62,13 +82,13 @@ pub fn run_all_rules_with_source(
         formatting::check_max_line_length(file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("format/trailing-whitespace") {
-        formatting::check_trailing_whitespace(file, &mut diagnostics);
+        formatting::check_trailing_whitespace(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/trailing-newline") {
         formatting::check_trailing_newline(file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/no-tabs-as-spaces") {
-        formatting::check_indentation_style(file, config, &mut diagnostics);
+        formatting::check_indentation_style(tokens, file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("format/boolean-operators") {
         formatting::check_boolean_operators(tokens, file, &mut diagnostics);
@@ -89,7 +109,7 @@ pub fn run_all_rules_with_source(
         formatting::check_one_statement_per_line(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/blank-lines") {
-        formatting::check_blank_lines(file, &mut diagnostics);
+        formatting::check_blank_lines(tokens, file, &mut diagnostics);
     }
     if config.is_rule_enabled("format/trailing-comma") {
         formatting::check_trailing_comma(tokens, file, &mut diagnostics);
@@ -178,7 +198,9 @@ pub fn run_all_rules_with_source(
         quality::check_max_inner_classes(file, config, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/no-else-return") {
-        quality::check_no_else_return(file, &mut diagnostics);
+        if let Some(document) = document {
+            quality::check_no_else_return_with_document(file, document, &mut diagnostics);
+        }
     }
     if config.is_rule_enabled("quality/unreachable-code") {
         quality::check_unreachable_code(file, &mut diagnostics);
@@ -190,7 +212,9 @@ pub fn run_all_rules_with_source(
         quality::check_allocation_in_loop(file, &mut diagnostics);
     }
     if config.is_rule_enabled("quality/process-get-node") {
-        quality::check_process_get_node(file, &mut diagnostics);
+        if let Some(document) = document {
+            quality::check_process_get_node_with_document(file, document, &mut diagnostics);
+        }
     }
     if config.is_rule_enabled("quality/max-nesting-depth") {
         quality::check_max_nesting_depth(file, config, &mut diagnostics);

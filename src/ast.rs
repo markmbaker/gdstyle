@@ -139,10 +139,7 @@ impl ClassMember {
             ClassMember::Constant { .. } => 6,
             ClassMember::StaticVariable { .. } => 7,
             ClassMember::Variable { annotations, .. } => {
-                if annotations
-                    .iter()
-                    .any(|a| a.name == "export" || a.name.starts_with("export_"))
-                {
+                if annotations.iter().any(|a| is_export_annotation(&a.name)) {
                     8
                 } else if annotations.iter().any(|a| a.name == "onready") {
                     10
@@ -210,10 +207,7 @@ impl ClassMember {
             ClassMember::Constant { .. } => "constant declaration",
             ClassMember::StaticVariable { .. } => "static variable",
             ClassMember::Variable { annotations, .. } => {
-                if annotations
-                    .iter()
-                    .any(|a| a.name == "export" || a.name.starts_with("export_"))
-                {
+                if annotations.iter().any(|a| is_export_annotation(&a.name)) {
                     "@export variable"
                 } else if annotations.iter().any(|a| a.name == "onready") {
                     "@onready variable"
@@ -296,4 +290,11 @@ pub struct EnumMember {
 pub struct AnnotationInfo {
     pub name: String,
     pub span: Span,
+}
+
+/// Whether an annotation exports a value, rather than marking an inspector section.
+pub fn is_export_annotation(name: &str) -> bool {
+    name == "export"
+        || (name.starts_with("export_")
+            && !matches!(name, "export_group" | "export_subgroup" | "export_category"))
 }

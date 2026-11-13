@@ -1040,47 +1040,57 @@ pub fn check_max_inner_classes(
 /// Warn when an `else` or `elif` follows an `if` block that ends with `return`.
 /// The else/elif is unnecessary because the `return` already exits.
 pub fn check_no_else_return(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    for (i, line) in file.lines.iter().enumerate() {
-        let trimmed = line.trim();
-        // Look for `elif` or `else` lines
-        if !(trimmed.starts_with("elif ")
-            || trimmed.starts_with("elif(")
-            || trimmed == "else:"
-            || trimmed.starts_with("else:"))
-        {
-            continue;
-        }
+    let source = file.lines.join("\n");
+    let Some(document) = crate::syntax::SyntaxDocument::parse(&source) else {
+        return;
+    };
+    check_no_else_return_with_document(file, &document, diagnostics);
+}
 
-        let current_indent = indent_level(line);
-
-        // Walk backwards to find if the previous block ended with return
-        let mut j = i;
-        while j > 0 {
-            j -= 1;
-            let prev = file.lines[j].trim();
-            if prev.is_empty() || prev.starts_with('#') {
-                continue;
-            }
-            // Check if this line is at a deeper indent (inside the if block)
-            if indent_level(&file.lines[j]) > current_indent {
-                if prev.starts_with("return") {
-                    let kind = if trimmed.starts_with("elif") {
-                        "elif"
-                    } else {
-                        "else"
-                    };
-                    diagnostics.push(Diagnostic::warning(
-                        "quality/no-else-return",
-                        format!("unnecessary '{}' after 'return'", kind),
-                        Span::new(i + 1, 1, 0, 0),
-                        &file.path,
-                    ));
-                }
-                break;
-            } else {
-                break;
-            }
+pub(crate) fn check_no_else_return_with_document(
+    file: &ScriptFile,
+    document: &crate::syntax::SyntaxDocument<'_>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    visit_syntax(document.root_node(), &mut |node| {
+        if node.kind() != "if_statement" {
+            return;
         }
+        let ends_in_return = |branch: tree_sitter::Node<'_>| {
+            branch.child_by_field_name("body").is_some_and(|body| {
+                let mut cursor = body.walk();
+                body.named_children(&mut cursor)
+                    .filter(|n| n.kind() != "comment")
+                    .last()
+                    .is_some_and(|n| n.kind() == "return_statement")
+            })
+        };
+        let mut all_return = ends_in_return(node);
+        let mut cursor = node.walk();
+        for branch in node.children_by_field_name("alternative", &mut cursor) {
+            if all_return {
+                let kind = if branch.kind() == "elif_clause" {
+                    "elif"
+                } else {
+                    "else"
+                };
+                diagnostics.push(Diagnostic::warning(
+                    "quality/no-else-return",
+                    format!("unnecessary '{}' after 'return'", kind),
+                    Span::new(branch.start_position().row + 1, 1, 0, 0),
+                    &file.path,
+                ));
+            }
+            all_return &= ends_in_return(branch);
+        }
+    });
+}
+
+fn visit_syntax(node: tree_sitter::Node<'_>, visit: &mut impl FnMut(tree_sitter::Node<'_>)) {
+    visit(node);
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        visit_syntax(child, visit);
     }
 }
 
@@ -1349,72 +1359,59 @@ pub fn check_allocation_in_loop(file: &ScriptFile, diagnostics: &mut Vec<Diagnos
 /// Warn about node lookups (`get_node()`, `$`, `%`) in `_process` and
 /// `_physics_process` methods. These should be cached in `_ready` or `@onready`.
 pub fn check_process_get_node(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    check_process_get_node_recursive(&file.members, file, diagnostics);
+    let source = file.lines.join("\n");
+    let Some(document) = crate::syntax::SyntaxDocument::parse(&source) else {
+        return;
+    };
+    check_process_get_node_with_document(file, &document, diagnostics);
 }
 
-fn check_process_get_node_recursive(
-    members: &[ClassMember],
+pub(crate) fn check_process_get_node_with_document(
     file: &ScriptFile,
+    document: &crate::syntax::SyntaxDocument<'_>,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for_each_member(members, |member| {
-        let ClassMember::Function {
-            name,
-            body_line_count,
-            span,
-            ..
-        } = member
-        else {
+    let source = document.source();
+    visit_syntax(document.root_node(), &mut |node| {
+        if node.kind() != "function_definition" {
+            return;
+        }
+        let Some(name_node) = node.child_by_field_name("name") else {
             return;
         };
-        if name != "_process" && name != "_physics_process" {
+        let name = &source[name_node.byte_range()];
+        if !matches!(name, "_process" | "_physics_process") {
             return;
         }
-        let range = function_body_range(span, *body_line_count, file.lines.len());
-        for idx in range {
-            let trimmed = file.lines[idx].trim();
-            if trimmed.starts_with('#') {
-                continue;
+        let Some(body) = node.child_by_field_name("body") else {
+            return;
+        };
+        let mut lines = std::collections::BTreeSet::new();
+        visit_syntax(body, &mut |expression| {
+            let is_lookup = expression.kind() == "get_node"
+                || (matches!(expression.kind(), "call" | "attribute_call")
+                    && expression.named_child(0).is_some_and(|callee| {
+                        matches!(
+                            &source[callee.byte_range()],
+                            "get_node" | "get_node_or_null"
+                        )
+                    }));
+            if is_lookup {
+                lines.insert(expression.start_position().row + 1);
             }
-            let has_node_ref = trimmed.contains("get_node(")
-                || trimmed.contains("get_node_or_null(")
-                || trimmed.contains('$')
-                || has_unique_node_ref(trimmed);
-            if has_node_ref {
-                diagnostics.push(Diagnostic::warning(
-                    "quality/process-get-node",
-                    format!(
-                        "node lookup in '{}()'; cache the node in '_ready' or use '@onready'",
-                        name
-                    ),
-                    Span::new(idx + 1, 1, 0, 0),
-                    &file.path,
-                ));
-            }
+        });
+        for line in lines {
+            diagnostics.push(Diagnostic::warning(
+                "quality/process-get-node",
+                format!(
+                    "node lookup in '{}()'; cache the node in '_ready' or use '@onready'",
+                    name
+                ),
+                Span::new(line, 1, 0, 0),
+                &file.path,
+            ));
         }
     });
-}
-
-/// Check if a line contains a `%UniqueNode` reference, distinguishing it from
-/// the modulo operator.
-///
-/// The reliable discriminator is the character *after* `%`: a unique-node
-/// reference is `%` immediately followed by an identifier character or a
-/// quote (`%Player`, `%"Health Bar"`), with no space. The modulo operator
-/// `a % b` always has a space or a digit-with-space around it. Relying on
-/// the character *before* `%` was wrong, `a % b` has a space before `%`
-/// just like ` %Node` does.
-fn has_unique_node_ref(line: &str) -> bool {
-    let bytes = line.as_bytes();
-    for (i, _) in line.match_indices('%') {
-        match bytes.get(i + 1) {
-            Some(&c) if c.is_ascii_alphabetic() || c == b'_' || c == b'"' || c == b'\'' => {
-                return true;
-            }
-            _ => {}
-        }
-    }
-    false
 }
 
 // ---------------------------------------------------------------------------

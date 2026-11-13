@@ -1,15 +1,15 @@
 use crate::ast::ClassMember;
-use crate::config::Config;
+use crate::config::{CommentWrap, Config};
 use crate::fixer;
 use crate::lexer::Lexer;
 use crate::linter;
 use crate::parser::Parser;
-use crate::token::TokenKind;
+use crate::token::{StringLines, TokenKind};
 
 /// Format a GDScript source string according to style rules.
 ///
-/// This applies ALL formatting transformations unconditionally, unlike --fix
-/// which only fixes flagged violations. The result is idempotent: formatting
+/// This applies formatting and member-layout transformations; disabling the
+/// ordering rule also disables reordering. The result is idempotent: formatting
 /// already-formatted source returns it unchanged. Syntax-invalid input is left
 /// unchanged, and a formatting pass is rejected if it would produce invalid
 /// GDScript.
@@ -32,7 +32,7 @@ pub fn format_source(source: &str, config: &Config) -> String {
     // Formatting partially written or malformed code can compound parser
     // recovery mistakes. Preserve it for the editor/user to repair first.
     if !crate::syntax::is_valid(&original) {
-        return original;
+        return source.to_string();
     }
 
     let mut result = original.clone();
@@ -41,7 +41,7 @@ pub fn format_source(source: &str, config: &Config) -> String {
     for _ in 0..5 {
         let formatted = format_pass(&result, config);
         if !crate::syntax::is_valid(&formatted) {
-            return original;
+            return source.to_string();
         }
         if formatted == result {
             break;
@@ -49,7 +49,7 @@ pub fn format_source(source: &str, config: &Config) -> String {
         result = formatted;
     }
 
-    result
+    crate::linter::restore_line_endings(source, &result)
 }
 
 fn format_pass(source: &str, config: &Config) -> String {
@@ -63,8 +63,10 @@ fn format_pass(source: &str, config: &Config) -> String {
     //    (because reordering could change the runtime init order), and the
     //    output is re-parsed to verify it has the same set of class members
     //    as the input: if anything mutated, we keep the original.
-    result = safe_reorder_class_members(&result);
-    result = reorder_inner_classes(&result);
+    if config.is_rule_enabled("order/class-member-order") {
+        result = safe_reorder_class_members(&result);
+        result = reorder_inner_classes(&result);
+    }
 
     // 2. Normalize indentation.
     result = normalize_indentation(&result, config);
@@ -109,13 +111,20 @@ fn format_pass(source: &str, config: &Config) -> String {
     result
 }
 
+/// The lines of `source` that multi-line string literals cover; see
+/// [`StringLines`]. Their whitespace, blank runs and length are string data.
+fn string_lines(source: &str) -> StringLines {
+    StringLines::new(&Lexer::new(source).tokenize(), source.split('\n').count())
+}
+
 fn normalize_indentation(source: &str, config: &Config) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
+    let strings = string_lines(source);
     let mut result = Vec::new();
 
-    for line in &lines {
-        if line.is_empty() {
-            result.push(String::new());
+    for (idx, line) in lines.iter().enumerate() {
+        if line.is_empty() || strings.is_interior(idx) {
+            result.push(line.to_string());
             continue;
         }
 
@@ -146,9 +155,17 @@ fn normalize_indentation(source: &str, config: &Config) -> String {
 }
 
 fn strip_trailing_whitespace(source: &str) -> String {
+    let strings = string_lines(source);
     source
         .split('\n')
-        .map(|line| line.trim_end().to_string())
+        .enumerate()
+        .map(|(idx, line)| {
+            if strings.ends_inside(idx) {
+                line.to_string()
+            } else {
+                line.trim_end().to_string()
+            }
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -211,6 +228,30 @@ struct MemberUnit {
     decl_start: usize, // 1-indexed; >= start
 }
 
+// The lexer treats every `##` prefix as documentation. Pure-hash lines are
+// decorative unless they share a block with documentation. A bare `##`
+// remains an empty documentation line, and `## ###` remains documentation.
+fn is_hash_banner_content(content: &str) -> bool {
+    let content = content.trim_end();
+    !content.is_empty() && content.bytes().all(|b| b == b'#')
+}
+
+fn doc_comment_lines(members: &[ClassMember]) -> std::collections::HashSet<usize> {
+    let comments: Vec<_> = members
+        .iter()
+        .filter_map(|member| match member {
+            ClassMember::DocComment { span, text } => Some((span.line, text)),
+            _ => None,
+        })
+        .collect();
+
+    comments
+        .chunk_by(|(previous, _), (next, _)| *next == *previous + 1)
+        .filter(|block| block.iter().any(|(_, text)| !is_hash_banner_content(text)))
+        .flat_map(|block| block.iter().map(|(line, _)| *line))
+        .collect()
+}
+
 /// Rewrite the source so the blank lines BETWEEN top-level class members match
 /// the canonical Godot style guide spacing. The contents of each member are
 /// preserved verbatim; only the gaps between them change.
@@ -252,9 +293,10 @@ fn normalize_member_spacing(source: &str) -> String {
             *last = None;
         };
 
+    let doc_lines = doc_comment_lines(&members);
     for member in &members {
         match member {
-            ClassMember::DocComment { span, .. } => {
+            ClassMember::DocComment { span, .. } if doc_lines.contains(&span.line) => {
                 if let Some(prev_last) = pending_doc_last {
                     if span.line != prev_last + 1 {
                         // Non-consecutive: the older block is a standalone
@@ -271,8 +313,8 @@ fn normalize_member_spacing(source: &str) -> String {
                 }
                 pending_doc_last = Some(span.line);
             }
-            ClassMember::Comment { span, .. } => {
-                // Track a contiguous block of plain `#` comments so a block
+            ClassMember::Comment { span, .. } | ClassMember::DocComment { span, .. } => {
+                // Track plain `#` comments and pure-hash banners so a block
                 // sitting tight against the next declaration can attach to it
                 // as a leading comment (see the declaration arm). A
                 // non-consecutive comment starts a fresh block. Pending docs
@@ -441,11 +483,12 @@ fn normalize_member_spacing(source: &str) -> String {
 
 fn collapse_blank_lines(source: &str) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
+    let strings = string_lines(source);
     let mut result = Vec::new();
     let mut blank_count = 0;
 
-    for line in &lines {
-        if line.trim().is_empty() {
+    for (idx, line) in lines.iter().enumerate() {
+        if line.trim().is_empty() && !strings.ends_inside(idx) {
             blank_count += 1;
             if blank_count <= 2 {
                 result.push(String::new());
@@ -649,36 +692,247 @@ fn lint_then_fix(source: &str, config: &Config) -> String {
 /// - Lines where the content inside delimiters has only one item
 /// - Lines where breaking wouldn't reduce the length below the limit
 fn break_long_lines(source: &str, config: &Config) -> String {
-    const TAB_WIDTH: usize = 4;
-    let max_len = config.max_line_length;
-    let lines: Vec<&str> = source.split('\n').collect();
-    let mut result: Vec<String> = Vec::new();
-
+    let lines: Vec<_> = source.split('\n').collect();
+    let strings = string_lines(source);
+    let suppressions = crate::linter::Suppressions::parse(source);
+    let editable = |i: usize| {
+        !strings.is_interior(i)
+            && !suppressions.suppresses_member(i + 1, i + 1, "format/max-line-length")
+    };
+    let mut result = Vec::new();
+    let mut in_code_block = false;
     let mut i = 0;
     while i < lines.len() {
         let line = lines[i];
-        let visual_len = visual_line_len(line, TAB_WIDTH);
-
-        if visual_len <= max_len {
+        let comment = line.trim_start().starts_with('#') && !strings.is_interior(i);
+        let was_in_code_block = in_code_block;
+        if comment {
+            in_code_block = code_block_state_after(line, in_code_block);
+        }
+        if !editable(i) || visual_line_len(line, 4) <= config.max_line_length {
             result.push(line.to_string());
             i += 1;
             continue;
         }
-
-        // Try multiple strategies to break this line.
-        if let Some(broken) = try_break_line(line, config) {
-            result.extend(broken);
-        } else if let Some(broken) = try_break_comment(line, max_len) {
-            result.extend(broken);
-        } else if let Some(broken) = try_break_at_bool_operators(line, config) {
+        if comment {
+            let wrapped = match config.comment_wrap {
+                CommentWrap::Paragraph if !was_in_code_block && !in_code_block => {
+                    reflow_comment_paragraph(&lines, i, config.max_line_length, &editable)
+                }
+                CommentWrap::Line if !was_in_code_block && !in_code_block => {
+                    try_break_comment(line, config.max_line_length).map(|lines| (lines, 1))
+                }
+                _ => None,
+            };
+            if let Some((wrapped, consumed)) = wrapped {
+                result.extend(wrapped);
+                i += consumed;
+            } else {
+                result.push(line.to_string());
+                i += 1;
+            }
+            continue;
+        }
+        if let Some(broken) =
+            try_break_line(line, config).or_else(|| try_break_at_bool_operators(line, config))
+        {
             result.extend(broken);
         } else {
             result.push(line.to_string());
         }
         i += 1;
     }
-
     result.join("\n")
+}
+
+/// Whether a doc comment `[codeblock]` is open after comment `line`, given
+/// whether one was open before it. The tags count only on a line of their
+/// own, as Godot's docs write them, so prose that mentions `[codeblock]`
+/// opens nothing. The variants `[codeblocks]` and `[codeblock lang=...]`
+/// count too.
+fn code_block_state_after(line: &str, is_open: bool) -> bool {
+    let text = line.trim_start().trim_start_matches('#').trim();
+    if text.contains("[/codeblock") {
+        false
+    } else {
+        is_open || (text.starts_with("[codeblock") && text.ends_with(']'))
+    }
+}
+
+/// A `#` or `##` comment line split into its parts: the prefix (indent,
+/// marker and every space after it) and the text.
+struct CommentLine<'a> {
+    prefix: &'a str,
+    text: &'a str,
+}
+
+/// Split `line` into a [`CommentLine`]. `None` for anything but a plain
+/// comment: code, `#!`, `#region`, or a comment with no space after the
+/// marker, none of which are wrapped. The spaces after the marker belong to
+/// the prefix, so a nested list item (`#   - item`) keeps its indent.
+fn split_comment_line(line: &str) -> Option<CommentLine<'_>> {
+    let indent_len = line.len() - line.trim_start_matches([' ', '\t']).len();
+    let content = &line[indent_len..];
+    let marker_len = if content.starts_with("##") { 2 } else { 1 };
+    if !content.starts_with('#') || content.as_bytes().get(marker_len) != Some(&b' ') {
+        return None;
+    }
+    let after_marker = &content[marker_len..];
+    let spaces_len = after_marker.len() - after_marker.trim_start_matches(' ').len();
+    let prefix_len = indent_len + marker_len + spaces_len;
+    Some(CommentLine {
+        prefix: &line[..prefix_len],
+        text: &line[prefix_len..],
+    })
+}
+
+/// Byte length of the list marker and its space at the start of comment
+/// text: `- `, `* `, `+ `, `1. ` or `1) `.
+fn list_marker_len(text: &str) -> Option<usize> {
+    if text.starts_with("- ") || text.starts_with("* ") || text.starts_with("+ ") {
+        return Some(2);
+    }
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    let after_digits = text.as_bytes().get(digits..digits + 2)?;
+    (digits > 0 && matches!(after_digits, [b'.' | b')', b' '])).then_some(digits + 2)
+}
+
+/// True when comment text starts a paragraph of its own: a list item or a
+/// tag like `TODO:`.
+fn starts_own_paragraph(text: &str) -> bool {
+    const TAGS: [&str; 6] = ["TODO", "FIXME", "NOTE", "HACK", "XXX", "BUG"];
+    list_marker_len(text).is_some()
+        || TAGS.iter().any(|tag| {
+            text.strip_prefix(tag)
+                .is_some_and(|rest| rest.starts_with([':', '(', ' ']))
+        })
+}
+
+/// True when comment text must keep its line breaks: commented-out code, a
+/// table, a URL (which can't be split), or a `gdstyle:` directive.
+///
+/// The code test is a heuristic tuned to miss rather than misfire on prose.
+/// It looks for declarations, block headers ending in `:`, `return` or
+/// `await` with an expression, assignments, and lines that are one call. A
+/// miss treats the line as prose, as `line` mode treats every comment.
+fn is_verbatim_comment_text(text: &str) -> bool {
+    const DECLARATIONS: [&str; 8] = [
+        "var ",
+        "const ",
+        "func ",
+        "signal ",
+        "enum ",
+        "class ",
+        "extends ",
+        "class_name ",
+    ];
+    const BLOCK_KEYWORDS: [&str; 7] = [
+        "if ",
+        "elif ",
+        "else",
+        "for ",
+        "while ",
+        "match ",
+        "static func ",
+    ];
+    let text = text.trim();
+    if text.contains("://") || text.starts_with("gdstyle:") || has_column_gap(text) {
+        return true;
+    }
+    if text.starts_with('@') || DECLARATIONS.iter().any(|keyword| text.starts_with(keyword)) {
+        return true;
+    }
+    if text.ends_with(':')
+        && BLOCK_KEYWORDS
+            .iter()
+            .any(|keyword| text.starts_with(keyword))
+    {
+        return true;
+    }
+    if matches!(text, "pass" | "break" | "continue" | "return") || text.ends_with(';') {
+        return true;
+    }
+    // `return x`, `await get_tree().process_frame`. Prose like "return the
+    // value" has more than one word and doesn't end in a bracket.
+    for keyword in ["return ", "await "] {
+        if let Some(expression) = text.strip_prefix(keyword) {
+            if !expression.contains(' ') || expression.ends_with([')', ']']) {
+                return true;
+            }
+        }
+    }
+    // A statement that starts with a name: `speed += 1`, `print("hi", x)`,
+    // `$Timer.start(0.5)`. Names may be dotted, node paths included.
+    let name_len = text
+        .find(|c: char| !(c.is_alphanumeric() || matches!(c, '_' | '.' | '$' | '%' | '/')))
+        .unwrap_or(text.len());
+    if name_len == 0 {
+        return false;
+    }
+    let after_name = text[name_len..].trim_start();
+    let is_assignment = ["= ", "+= ", "-= ", "*= ", "/= ", ":= "]
+        .iter()
+        .any(|operator| after_name.starts_with(operator));
+    let is_call = after_name.starts_with('(') && text.ends_with(')');
+    is_assignment || is_call
+}
+
+/// True when `text` has a run of spaces inside it that isn't the double
+/// space some writers put after a sentence: the column gap of a table
+/// (`speed   float   1.0`).
+fn has_column_gap(text: &str) -> bool {
+    text.match_indices("  ")
+        .any(|(index, _)| !text[..index].ends_with(['.', '!', '?', ':']))
+}
+
+/// Wrap the long comment line `lines[start]` and refill the rest of its
+/// paragraph (see [`CommentWrap::Paragraph`]). Returns the new lines and how
+/// many source lines they replace, or `None` to leave the line as it is.
+///
+/// A list item's continuation lines are indented under its text, so a
+/// following line belongs to the item when it has that indent.
+fn reflow_comment_paragraph(
+    lines: &[&str],
+    start: usize,
+    max_len: usize,
+    is_editable: &dyn Fn(usize) -> bool,
+) -> Option<(Vec<String>, usize)> {
+    let first = split_comment_line(lines[start])?;
+    if first.text.trim().is_empty() || is_verbatim_comment_text(first.text) {
+        return None;
+    }
+    let continuation_prefix = match list_marker_len(first.text) {
+        Some(marker_len) => format!("{}{}", first.prefix, " ".repeat(marker_len)),
+        None => first.prefix.to_string(),
+    };
+
+    let mut words: Vec<&str> = first.text.split_whitespace().collect();
+    let mut end = start + 1;
+    while end < lines.len() && is_editable(end) {
+        let Some(text) = lines[end].strip_prefix(continuation_prefix.as_str()) else {
+            break;
+        };
+        let text = text.trim_end();
+        let is_paragraph_line = !text.is_empty()
+            && !text.starts_with([' ', '\t'])
+            && !text.starts_with('#')
+            && !starts_own_paragraph(text)
+            && !is_verbatim_comment_text(text)
+            && !text.contains("[codeblock")
+            && !text.contains("[/codeblock");
+        if !is_paragraph_line {
+            break;
+        }
+        words.extend(text.split_whitespace());
+        end += 1;
+    }
+
+    let reflowed = wrap_comment_words(&words, first.prefix, &continuation_prefix, max_len);
+    let consumed = end - start;
+    if consumed == 1 && reflowed.len() < 2 {
+        return None;
+    }
+    Some((reflowed, consumed))
 }
 
 fn visual_line_len(line: &str, tab_width: usize) -> usize {
@@ -907,62 +1161,59 @@ fn split_top_level_commas(content: &str) -> Vec<String> {
 
 /// Break a long comment at word boundaries.
 fn try_break_comment(line: &str, max_len: usize) -> Option<Vec<String>> {
-    const TAB_WIDTH: usize = 4;
-    let indent: String = line
-        .chars()
-        .take_while(|c| *c == '\t' || *c == ' ')
-        .collect();
-    let content = &line[indent.len()..];
-
-    // Must be a comment line (# or ##).
-    if !content.starts_with('#') {
+    let comment = split_comment_line(line)?;
+    if is_verbatim_comment_text(comment.text) {
         return None;
     }
-
-    // Extract the comment prefix (# or ##) and the text. A bare `#`, a `#!`
-    // shebang, or any non-comment line yields None (the `?` on the `# `
-    // branch), so we never try to wrap those.
-    let (prefix, text) = if let Some(rest) = content.strip_prefix("## ") {
-        ("## ", rest)
-    } else {
-        ("# ", content.strip_prefix("# ")?)
-    };
-
-    let prefix_visual_len = visual_line_len(&format!("{}{}", indent, prefix), TAB_WIDTH);
-
-    // Split text into words and wrap.
-    let words: Vec<&str> = text.split_whitespace().collect();
+    let words: Vec<_> = comment.text.split_whitespace().collect();
     if words.is_empty() {
         return None;
     }
+    let continuation = match list_marker_len(comment.text) {
+        Some(n) => format!("{}{}", comment.prefix, " ".repeat(n)),
+        None => comment.prefix.to_string(),
+    };
+    let wrapped = wrap_comment_words(&words, comment.prefix, &continuation, max_len);
+    (wrapped.len() > 1).then_some(wrapped)
+}
 
+/// Lay `words` out as comment lines of at most `max_len` columns. The first
+/// line starts with `first_prefix` (indent and `# `), the others with
+/// `continuation_prefix`. A word wider than a line gets a line of its own.
+///
+/// A wrapped line never starts with a `gdstyle:` word: `# gdstyle:ignore`
+/// at the start of a comment is a suppression directive, so the word before
+/// it moves down too, or it stays on the line it was on.
+fn wrap_comment_words(
+    words: &[&str],
+    first_prefix: &str,
+    continuation_prefix: &str,
+    max_len: usize,
+) -> Vec<String> {
+    const TAB_WIDTH: usize = 4;
+    // Columns, not bytes: an accented word takes one column per char.
+    let line_width = |prefix: &str, line_words: &[&str]| {
+        let words_width: usize = line_words.iter().map(|word| word.chars().count()).sum();
+        visual_line_len(prefix, TAB_WIDTH) + words_width + line_words.len().saturating_sub(1)
+    };
     let mut lines_out: Vec<String> = Vec::new();
-    let mut current_line = format!("{}{}", indent, prefix);
-    let mut current_visual = prefix_visual_len;
+    let mut prefix = first_prefix;
+    let mut line_words: Vec<&str> = Vec::new();
 
-    for word in &words {
-        let word_len = word.len();
-        if current_visual > prefix_visual_len && current_visual + 1 + word_len > max_len {
-            // Start a new line.
-            lines_out.push(current_line);
-            current_line = format!("{}{}{}", indent, prefix, word);
-            current_visual = prefix_visual_len + word_len;
-        } else {
-            if current_visual > prefix_visual_len {
-                current_line.push(' ');
-                current_visual += 1;
-            }
-            current_line.push_str(word);
-            current_visual += word_len;
+    for &word in words {
+        let fits = line_width(prefix, &line_words) + 1 + word.chars().count() <= max_len;
+        let is_directive = word.starts_with("gdstyle:") || word.starts_with('@');
+        if line_words.is_empty() || fits || (is_directive && line_words.len() == 1) {
+            line_words.push(word);
+            continue;
         }
+        let carried = if is_directive { line_words.pop() } else { None };
+        lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
+        prefix = continuation_prefix;
+        line_words = carried.into_iter().chain([word]).collect();
     }
-    lines_out.push(current_line);
-
-    // Only return if we actually split into multiple lines.
-    if lines_out.len() < 2 {
-        return None;
-    }
-    Some(lines_out)
+    lines_out.push(format!("{}{}", prefix, line_words.join(" ")));
+    lines_out
 }
 
 /// Break long `if`/`elif`/`while` conditions at `and`/`or` operators.
@@ -1097,14 +1348,16 @@ fn split_at_bool_operators(condition: &str) -> Vec<String> {
                 current.push(chars[i]);
             }
             _ if depth == 0 => {
-                // Check for " and " or " or " at this position.
-                let remaining = &condition[i..];
-                if remaining.starts_with(" and ") {
+                // Check for " and " or " or " at this position. `i` counts
+                // chars, not bytes, so compare chars: slicing `condition`
+                // with it breaks after a multi-byte character.
+                let remaining = &chars[i..];
+                if remaining.starts_with(&[' ', 'a', 'n', 'd', ' ']) {
                     parts.push(current.clone());
                     current = String::from("and ");
                     i += 5; // skip " and "
                     continue;
-                } else if remaining.starts_with(" or ") {
+                } else if remaining.starts_with(&[' ', 'o', 'r', ' ']) {
                     parts.push(current.clone());
                     current = String::from("or ");
                     i += 4; // skip " or "
@@ -1128,6 +1381,24 @@ fn split_at_bool_operators(condition: &str) -> Vec<String> {
 /// reorder would be unsafe or appears to have lost/mutated members.
 fn safe_reorder_class_members(source: &str) -> String {
     let original_members = parse_members(source);
+    // Region markers and inspector section markers delimit semantic groups.
+    // Preserve their member order, including inside nested classes.
+    if Lexer::new(source).tokenize().iter().any(|t| match &t.kind {
+        TokenKind::Comment(text) => {
+            text.trim_start().starts_with("region") || text.trim_start().starts_with("endregion")
+        }
+        TokenKind::Annotation(name) => matches!(
+            name.as_str(),
+            "warning_ignore_start"
+                | "warning_ignore_restore"
+                | "export_group"
+                | "export_subgroup"
+                | "export_category"
+        ),
+        _ => false,
+    }) {
+        return source.to_string();
+    }
 
     // Guard 1: refuse to reorder when a module-level var initializer references
     // another module-level identifier in the same file. GDScript evaluates
@@ -1490,13 +1761,19 @@ fn reorder_class_members(source: &str) -> String {
         })
         .collect();
 
-    emit_reordered_blocks(&ordered, &lines, &attached_starts)
+    let doc_lines = doc_comment_lines(&members);
+    emit_reordered_blocks(&ordered, &lines, &attached_starts, &doc_lines)
 }
 
 /// Reconstruct the source with `blocks` in their new (sorted) order,
 /// normalising blank-line separators and deferring class doc comments to
 /// after the `class_name`/`extends` declarations.
-fn emit_reordered_blocks(blocks: &[Block], lines: &[&str], attached_starts: &[usize]) -> String {
+fn emit_reordered_blocks(
+    blocks: &[Block],
+    lines: &[&str],
+    attached_starts: &[usize],
+    doc_lines: &std::collections::HashSet<usize>,
+) -> String {
     let mut result: Vec<String> = Vec::new();
 
     // Lines before the first block (e.g., initial blank lines, shebang).
@@ -1525,9 +1802,9 @@ fn emit_reordered_blocks(blocks: &[Block], lines: &[&str], attached_starts: &[us
         if block.category <= 2 {
             let doc_end = block_lines
                 .iter()
-                .position(|l| {
-                    let t = l.trim();
-                    !t.starts_with("##") && !t.is_empty()
+                .enumerate()
+                .position(|(offset, line)| {
+                    !doc_lines.contains(&(block.start + offset + 1)) && !line.trim().is_empty()
                 })
                 .unwrap_or(0);
             if doc_end > 0 {
@@ -1605,17 +1882,16 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
     let lines: Vec<&str> = source.split('\n').collect();
 
     // Find the first ## doc comment line.
-    let doc_start = lines.iter().position(|l| l.trim().starts_with("##"));
-    if doc_start.is_none() {
+    let doc_lines = doc_comment_lines(&parse_members(source));
+    let Some(doc_start) = doc_lines.iter().min().map(|line| line - 1) else {
         return source.to_string();
-    }
-    let doc_start = doc_start.unwrap();
+    };
 
     // Find where the doc block ends (first non-## non-blank line after doc_start).
     let mut doc_end = doc_start;
     for (i, line) in lines.iter().enumerate().skip(doc_start) {
         let t = line.trim();
-        if t.starts_with("##") || t.is_empty() {
+        if doc_lines.contains(&(i + 1)) || t.is_empty() {
             doc_end = i;
         } else {
             break;
@@ -1667,6 +1943,7 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
 
 /// Find inner class blocks in the source and recursively reorder their members.
 fn reorder_inner_classes(source: &str) -> String {
+    let strings = string_lines(source);
     let lines: Vec<&str> = source.split('\n').collect();
     let mut result: Vec<String> = Vec::new();
     let mut i = 0;
@@ -1678,7 +1955,7 @@ fn reorder_inner_classes(source: &str) -> String {
             .chars()
             .take_while(|c| *c == '\t' || *c == ' ')
             .collect();
-        if trimmed.starts_with("class ") && trimmed.ends_with(':') {
+        if !strings.is_interior(i) && trimmed.starts_with("class ") && trimmed.ends_with(':') {
             // Found an inner class. Collect its header and indented body.
             result.push(lines[i].to_string());
             let class_indent_len = indent.len();
@@ -1689,6 +1966,10 @@ fn reorder_inner_classes(source: &str) -> String {
             let body_start = i;
             while i < lines.len() {
                 let line = lines[i];
+                if strings.is_interior(i) {
+                    i += 1;
+                    continue;
+                }
                 if line.trim().is_empty() {
                     // Blank line: include if the next non-blank line is still in the body.
                     let mut next_nonblank = i + 1;
@@ -1722,8 +2003,11 @@ fn reorder_inner_classes(source: &str) -> String {
                 // Extract body, dedent by one level, reorder, re-indent.
                 let body_lines: Vec<String> = lines[body_start..body_end]
                     .iter()
-                    .map(|l| {
-                        if l.trim().is_empty() {
+                    .enumerate()
+                    .map(|(offset, l)| {
+                        if strings.is_interior(body_start + offset) {
+                            l.to_string()
+                        } else if l.trim().is_empty() {
                             String::new()
                         } else if l.starts_with(&format!("{}\t", indent)) {
                             l[indent.len() + 1..].to_string()
@@ -1745,8 +2029,11 @@ fn reorder_inner_classes(source: &str) -> String {
 
                 // Re-indent and add to result.
                 let member_indent = format!("{}\t", indent);
-                for line in reordered.split('\n') {
-                    if line.trim().is_empty() {
+                let reordered_strings = string_lines(&reordered);
+                for (index, line) in reordered.split('\n').enumerate() {
+                    if reordered_strings.is_interior(index) {
+                        result.push(line.to_string());
+                    } else if line.trim().is_empty() {
                         result.push(String::new());
                     } else {
                         result.push(format!("{}{}", member_indent, line));
@@ -1788,6 +2075,32 @@ mod tests {
         let source = "var x = 5   \nvar y = 10\t\t\n";
         let result = strip_trailing_whitespace(source);
         assert_eq!(result, "var x = 5\nvar y = 10\n");
+    }
+
+    #[test]
+    fn line_passes_skip_multiline_string_contents() {
+        // Everything between the opening and closing `"""` is string data.
+        let source = "extends Node\n\nconst T = \"\"\"a   \n\n\n\n    b\n\tc\n\"\"\"\n";
+        assert_eq!(strip_trailing_whitespace(source), source);
+        assert_eq!(collapse_blank_lines(source), source);
+        assert_eq!(normalize_indentation(source, &Config::default()), source);
+        let long = format!("var s = \"\"\"\nf({})\n\"\"\"\n", "a, ".repeat(60));
+        assert_eq!(break_long_lines(&long, &Config::default()), long);
+    }
+
+    #[test]
+    fn format_source_keeps_multiline_string_contents() {
+        let source = "extends Node\n\nconst T = \"\"\"a   \n\n\n\n    b\n\tc\n\"\"\"\n";
+        assert_eq!(format_source(source, &Config::default()), source);
+    }
+
+    #[test]
+    fn format_source_keeps_closing_line_followed_by_another_string() {
+        // A second string on the closing line must not clear that line's mask.
+        let tail = "func f() -> String:\n\tvar s := \"\"\"\nline\n    closing indent kept\"\"\" % \"x\"\n\treturn s\n";
+        assert_eq!(format_source(tail, &Config::default()), tail);
+        let pair = "var t := \"\"\"a\n    b\"\"\" + \"\"\"c\n    d\"\"\"\n";
+        assert_eq!(format_source(pair, &Config::default()), pair);
     }
 
     #[test]
@@ -1907,7 +2220,7 @@ func take_damage(amount: int) -> void:
     #[test]
     fn syntax_invalid_input_is_not_rewritten() {
         let source = "func broken( -> void:\r\n\tpass   \r\n";
-        let expected = "func broken( -> void:\n\tpass   \n";
+        let expected = "func broken( -> void:\r\n\tpass   \r\n";
 
         assert_eq!(format_source(source, &Config::default()), expected);
     }

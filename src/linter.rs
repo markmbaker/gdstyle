@@ -5,6 +5,7 @@ use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::rules;
 use crate::syntax;
+use crate::token::TokenKind;
 
 /// Lint a single GDScript source string and return diagnostics.
 ///
@@ -60,7 +61,13 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     };
 
     // Run all rules.
-    let mut diagnostics = rules::run_all_rules_with_source(&file, &tokens, config, Some(source));
+    let mut diagnostics = rules::run_all_rules_with_document(
+        &file,
+        &tokens,
+        config,
+        Some(source),
+        syntax_document.as_ref(),
+    );
 
     let parse_errors_enabled = config.is_rule_enabled("syntax/parse-error");
 
@@ -111,13 +118,84 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     diagnostics
 }
 
-/// Convert any `\r\n` or bare `\r` to `\n`. We do this before any byte-offset
-/// computation so the rest of the pipeline can assume LF-only newlines.
+/// Convert every `\r\n` outside string literals to `\n`. We do this before
+/// any byte-offset computation so the rest of the pipeline can assume
+/// LF-only line breaks between tokens.
+///
+/// Two things are left alone. A string that spans lines keeps its bytes,
+/// `\r\n` included: Godot keeps a `\r` inside a string as part of its value,
+/// and leaving it in place means no pass has to put it back. A `\r` that
+/// isn't followed by `\n` stays too: Godot doesn't treat it as a line break
+/// (it is part of a string or comment, or a "stray carriage return" error in
+/// code), so turning it into `\n` would split the line.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::linter::normalize_line_endings;
+///
+/// let source = "var a = 1\r\nvar s = \"\"\"x\r\ny\"\"\"\r\n";
+/// assert_eq!(normalize_line_endings(source), "var a = 1\nvar s = \"\"\"x\r\ny\"\"\"\n");
+/// ```
 pub fn normalize_line_endings(source: &str) -> String {
-    if !source.contains('\r') {
+    if !source.contains("\r\n") {
         return source.to_string();
     }
-    source.replace("\r\n", "\n").replace('\r', "\n")
+    map_outside_spanning_strings(source, |code| code.replace("\r\n", "\n"))
+}
+
+/// Put `source`'s line-ending style back on `normalized`: the output of
+/// [`normalize_line_endings`] for `source`, after any edits.
+///
+/// The style comes from `source`'s line breaks outside string literals:
+/// CRLF when most of them are `\r\n`, LF otherwise. It is applied to the line
+/// breaks outside strings. Strings that span lines were never normalized, so
+/// they keep their own line endings whatever the file's style is.
+///
+/// # Example
+///
+/// ```
+/// use gdstyle::linter::{normalize_line_endings, restore_line_endings};
+///
+/// // A CRLF file whose string holds an LF line break.
+/// let source = "var a = 1  \r\nvar s = \"\"\"x\ny\"\"\"\r\n";
+/// let edited = normalize_line_endings(source).replace("1  ", "1");
+/// assert_eq!(restore_line_endings(source, &edited), "var a = 1\r\nvar s = \"\"\"x\ny\"\"\"\r\n");
+/// ```
+pub fn restore_line_endings(source: &str, normalized: &str) -> String {
+    if !source.contains("\r\n") {
+        return normalized.to_string();
+    }
+    let mut crlf_breaks = 0;
+    let mut lf_breaks = 0;
+    map_outside_spanning_strings(source, |code| {
+        crlf_breaks += code.matches("\r\n").count();
+        lf_breaks += code.matches('\n').count();
+        String::new()
+    });
+    // `lf_breaks` counted every `\n`, the CRLF ones included.
+    if crlf_breaks * 2 <= lf_breaks {
+        return normalized.to_string();
+    }
+    map_outside_spanning_strings(normalized, |code| code.replace('\n', "\r\n"))
+}
+
+/// `source` with `map` applied to each stretch of text between the string
+/// literals that span lines. The literals themselves are copied unchanged.
+fn map_outside_spanning_strings(source: &str, mut map: impl FnMut(&str) -> String) -> String {
+    let mut mapped = String::with_capacity(source.len() + source.len() / 16);
+    let mut cursor = 0;
+    for token in Lexer::new(source).tokenize() {
+        if !matches!(token.kind, TokenKind::String(_)) || !token.text.contains('\n') {
+            continue;
+        }
+        let start = token.span.offset;
+        mapped.push_str(&map(&source[cursor..start]));
+        mapped.push_str(&token.text);
+        cursor = start + token.span.length;
+    }
+    mapped.push_str(&map(&source[cursor..]));
+    mapped
 }
 
 /// Lint a file from disk.

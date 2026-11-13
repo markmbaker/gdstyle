@@ -88,11 +88,11 @@ pub struct CrossFileReference {
 /// ```
 pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) -> String {
     // `diagnostics` was produced by `linter::lint_source`, which normalizes
-    // `\r\n`/`\r` to `\n` before computing byte offsets (see
+    // `\r\n` outside strings to `\n` before computing byte offsets (see
     // `normalize_line_endings`). Normalize here too so those offsets land on
     // the right bytes, then restore the original line-ending convention on
     // the way out so CRLF files stay CRLF.
-    let has_crlf = source.contains('\r');
+    let original_source = source;
     let normalized = crate::linter::normalize_line_endings(source);
     let source = normalized.as_str();
     let syntax_document = crate::syntax::SyntaxDocument::parse(source);
@@ -210,11 +210,7 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
         fixed
     };
 
-    if has_crlf {
-        fixed.replace('\n', "\r\n")
-    } else {
-        fixed
-    }
+    crate::linter::restore_line_endings(original_source, &fixed)
 }
 
 fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {
@@ -1032,9 +1028,11 @@ fn find_enum_for_member(members: &[ClassMember], member_old_name: &str) -> Optio
 
 fn collapse_blank_lines(source: &str) -> String {
     let mut result = String::with_capacity(source.len());
+    let strings =
+        crate::token::StringLines::new(&Lexer::new(source).tokenize(), source.split('\n').count());
     let mut consecutive_empty = 0;
-    for line in source.split('\n') {
-        if line.trim().is_empty() {
+    for (idx, line) in source.split('\n').enumerate() {
+        if line.trim().is_empty() && !strings.ends_inside(idx) {
             consecutive_empty += 1;
             if consecutive_empty <= 2 {
                 if !result.is_empty() {

@@ -258,6 +258,21 @@ gdstyle fmt --diff
 
 The formatter normalizes indentation, trailing whitespace, blank lines (including the spacing between class members), boolean operators (`&&`/`||`/`!` to `and`/`or`/`not`), string quotes, comment spacing, colon and comma spacing, float and hex literals, trailing newlines, and single-line enums (expanded to multi-line). It reorders class members to match the canonical style guide order, and wraps long lines at commas inside parentheses, brackets, and braces. Running it twice produces the same output.
 
+Multiline strings keep their contents byte for byte, including indentation, blank lines,
+trailing spaces, and line endings. CRLF files keep CRLF line endings outside strings.
+Disabling `order/class-member-order` also disables formatter reordering. Files with
+fold regions, warning regions, or inspector section markers retain their member order
+to preserve those boundaries.
+
+Long comments wrap one line at a time by default. Set `comment_wrap = "paragraph"`
+to refill consecutive prose comments with the same indent and marker, or
+`comment_wrap = "off"` to preserve comment line breaks. Paragraphs stop at blank
+comments, list items, tags, code, and tables. URLs, suppression directives, and
+`[codeblock]` contents stay intact. `format/max-line-length` still reports long lines.
+
+`fmt --diff --no-color` prints a unified diff with hunk headers that can be applied
+with `git apply`.
+
 > **Note:** Line wrapping breaks at comma boundaries inside delimiters (parentheses, brackets, braces), `and`/`or` operators in `if`/`elif`/`while` conditions, and word boundaries in long comments. Lines without any breakable pattern (e.g., long strings, property chains, continuation lines without enclosing delimiters) are left alone.
 
 ## Configuration
@@ -275,6 +290,9 @@ gdstyle init
 
 # Maximum line length (default: 100)
 max_line_length = 100
+
+# Comment wrapping: "line" (default), "paragraph", or "off".
+comment_wrap = "line"
 
 # Use tabs for indentation (default: true)
 use_tabs = true

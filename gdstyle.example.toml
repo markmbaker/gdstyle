@@ -7,6 +7,9 @@
 # Maximum line length (default: 100)
 max_line_length = 100
 
+# Comment wrapping: "line" (default), "paragraph", or "off".
+comment_wrap = "line"
+
 # Use tabs for indentation (default: true).
 # Set to false if your project uses spaces.
 use_tabs = true

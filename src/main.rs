@@ -648,30 +648,13 @@ fn run_fmt(paths: &[PathBuf], check: bool, diff: bool, config_path: Option<&Path
 }
 
 fn print_diff(path: &Path, original: &str, formatted: &str) {
-    let path_str = path.display().to_string();
-    println!("--- a/{}", path_str);
-    println!("+++ b/{}", path_str);
-
-    let orig_lines: Vec<&str> = original.lines().collect();
-    let fmt_lines: Vec<&str> = formatted.lines().collect();
-
-    // Simple line-by-line diff.
-    let max_lines = orig_lines.len().max(fmt_lines.len());
-    for i in 0..max_lines {
-        let orig = orig_lines.get(i).copied().unwrap_or("");
-        let fmt = fmt_lines.get(i).copied().unwrap_or("");
-        if orig != fmt {
-            if !orig.is_empty() || i < orig_lines.len() {
-                println!("{}", format!("-{}", orig).red());
-            }
-            if !fmt.is_empty() || i < fmt_lines.len() {
-                println!("{}", format!("+{}", fmt).green());
-            }
-        } else {
-            println!(" {}", orig);
-        }
-    }
-    println!();
+    let old = format!("a/{}", path.display());
+    let new = format!("b/{}", path.display());
+    let diff = similar::TextDiff::from_lines(original, formatted);
+    print!(
+        "{}",
+        diff.unified_diff().context_radius(3).header(&old, &new)
+    );
 }
 
 fn run_init(force: bool) {
@@ -695,6 +678,9 @@ fn run_init(force: bool) {
 
 # Maximum line length (default: 100)
 max_line_length = 100
+
+# Comment wrapping: "line" (default), "paragraph", or "off".
+comment_wrap = "line"
 
 # Use tabs for indentation (default: true).
 # Set to false if your project uses spaces.

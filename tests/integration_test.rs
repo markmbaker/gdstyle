@@ -3592,15 +3592,15 @@ fn formatter_handles_crlf_input() {
     let source = "var x = 'hello'\r\nvar y = 'world'\r\n";
     let config = default_config();
     let formatted = formatter::format_source(source, &config);
-    // Should normalize to LF and convert quotes
+    // Keep the file line endings while converting quotes
     assert!(
         formatted.contains("\"hello\""),
         "quotes should be normalized, got:\n{}",
         formatted
     );
     assert!(
-        !formatted.contains('\r'),
-        "\\r should be stripped from output, got:\n{:?}",
+        formatted.contains("\r\n"),
+        "CRLF line endings should be preserved, got:\n{:?}",
         formatted
     );
 }

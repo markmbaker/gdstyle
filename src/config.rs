@@ -44,6 +44,9 @@ pub struct Config {
     /// Maximum number of inner classes per file/class (default: 5).
     pub max_inner_classes: usize,
 
+    /// Wrapping mode for long comments.
+    pub comment_wrap: CommentWrap,
+
     /// File/directory patterns to exclude from linting.
     pub exclude: Vec<String>,
 
@@ -71,6 +74,7 @@ impl Default for Config {
         Self {
             max_line_length: 100,
             use_tabs: true,
+            comment_wrap: CommentWrap::Line,
             max_function_length: 50,
             max_file_length: 1000,
             max_parameters: 5,
@@ -254,4 +258,17 @@ include = ["addons/my_plugin"]
             Some(Severity::Error)
         );
     }
+}
+
+/// How the formatter wraps long comments.
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum CommentWrap {
+    /// Wrap each long line separately.
+    #[default]
+    Line,
+    /// Refill consecutive prose comments with the same indent and marker.
+    Paragraph,
+    /// Preserve comment line breaks.
+    Off,
 }
