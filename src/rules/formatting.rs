@@ -440,103 +440,60 @@ pub fn check_unnecessary_parens(
     }
 }
 
-/// Check number literal formatting (leading/trailing zeros, lowercase hex).
+/// Check hexadecimal literal formatting. Float zeros have their own rule.
 pub fn check_number_literals(
     tokens: &[Token],
     file: &ScriptFile,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
     for token in tokens {
-        match &token.kind {
-            TokenKind::Float(_) => {
-                let text = &token.text;
-                if text.starts_with('.') {
-                    let fixed = format!("0{}", text);
-                    diagnostics.push(
-                        Diagnostic::warning(
-                            "format/number-literals",
-                            format!("add leading zero: '0{}'", text),
-                            token.span,
-                            &file.path,
-                        )
-                        .with_fix(Fix {
-                            replacements: vec![Replacement {
-                                offset: token.span.offset,
-                                length: token.span.length,
-                                new_text: fixed,
-                            }],
-                            is_safe: true,
-                        }),
-                    );
-                }
-                if text.ends_with('.') {
-                    let fixed = format!("{}0", text);
-                    diagnostics.push(
-                        Diagnostic::warning(
-                            "format/number-literals",
-                            format!("add trailing zero: '{}0'", text),
-                            token.span,
-                            &file.path,
-                        )
-                        .with_fix(Fix {
-                            replacements: vec![Replacement {
-                                offset: token.span.offset,
-                                length: token.span.length,
-                                new_text: fixed,
-                            }],
-                            is_safe: true,
-                        }),
-                    );
-                }
+        if !matches!(token.kind, TokenKind::Integer(_)) {
+            continue;
+        }
+        let text = &token.text;
+        if text.starts_with("0x") || text.starts_with("0X") {
+            let hex_part = &text[2..];
+            if hex_part.chars().any(|c| c.is_ascii_uppercase() && c != '_') {
+                let fixed = format!("0x{}", hex_part.to_lowercase());
+                diagnostics.push(
+                    Diagnostic::warning(
+                        "format/number-literals",
+                        format!(
+                            "use lowercase hex digits: '{}'",
+                            text[..2].to_lowercase() + &hex_part.to_lowercase()
+                        ),
+                        token.span,
+                        &file.path,
+                    )
+                    .with_fix(Fix {
+                        replacements: vec![Replacement {
+                            offset: token.span.offset,
+                            length: token.span.length,
+                            new_text: fixed,
+                        }],
+                        is_safe: true,
+                    }),
+                );
             }
-            TokenKind::Integer(_) => {
-                let text = &token.text;
-                if text.starts_with("0x") || text.starts_with("0X") {
-                    let hex_part = &text[2..];
-                    if hex_part.chars().any(|c| c.is_ascii_uppercase() && c != '_') {
-                        let fixed = format!("0x{}", hex_part.to_lowercase());
-                        diagnostics.push(
-                            Diagnostic::warning(
-                                "format/number-literals",
-                                format!(
-                                    "use lowercase hex digits: '{}'",
-                                    text[..2].to_lowercase() + &hex_part.to_lowercase()
-                                ),
-                                token.span,
-                                &file.path,
-                            )
-                            .with_fix(Fix {
-                                replacements: vec![Replacement {
-                                    offset: token.span.offset,
-                                    length: token.span.length,
-                                    new_text: fixed,
-                                }],
-                                is_safe: true,
-                            }),
-                        );
-                    }
-                    if let Some(suffix) = text.strip_prefix("0X") {
-                        let fixed = format!("0x{}", suffix.to_lowercase());
-                        diagnostics.push(
-                            Diagnostic::warning(
-                                "format/number-literals",
-                                "use lowercase '0x' prefix for hex numbers".to_string(),
-                                token.span,
-                                &file.path,
-                            )
-                            .with_fix(Fix {
-                                replacements: vec![Replacement {
-                                    offset: token.span.offset,
-                                    length: token.span.length,
-                                    new_text: fixed,
-                                }],
-                                is_safe: true,
-                            }),
-                        );
-                    }
-                }
+            if let Some(suffix) = text.strip_prefix("0X") {
+                let fixed = format!("0x{}", suffix.to_lowercase());
+                diagnostics.push(
+                    Diagnostic::warning(
+                        "format/number-literals",
+                        "use lowercase '0x' prefix for hex numbers".to_string(),
+                        token.span,
+                        &file.path,
+                    )
+                    .with_fix(Fix {
+                        replacements: vec![Replacement {
+                            offset: token.span.offset,
+                            length: token.span.length,
+                            new_text: fixed,
+                        }],
+                        is_safe: true,
+                    }),
+                );
             }
-            _ => {}
         }
     }
 }
@@ -585,14 +542,52 @@ pub fn check_one_statement_per_line(
                 continue;
             }
 
-            // Replace semicolon and any trailing whitespace with newline + indent.
-            let mut replace_len = token.span.length;
-            // Consume whitespace between the semicolon and the next token.
-            if idx + 1 < tokens.len() {
-                let next = &tokens[idx + 1];
-                if next.kind != TokenKind::Newline {
-                    let gap = next.span.offset - (token.span.offset + token.span.length);
-                    replace_len += gap;
+            let after_semicolon = &line[semi_col + token.span.length..];
+            let after_spaces = after_semicolon.trim_start_matches([' ', '\t']);
+            let line_ending = after_spaces.trim_end_matches('\r');
+            let ends_statement = line_ending.is_empty() || line_ending.starts_with('#');
+            let (offset, replace_len, new_text) = if ends_statement {
+                // A trailing separator is removed, not split into a new empty
+                // line. Keep a trailing comment attached to this statement.
+                let before = &line[..semi_col];
+                let start = before.trim_end_matches([' ', '\t']).len();
+                let length = semi_col + token.span.length - start + after_semicolon.len()
+                    - after_spaces.len();
+                (
+                    token.span.offset - (semi_col - start),
+                    length,
+                    if line_ending.starts_with('#') {
+                        " ".to_string()
+                    } else {
+                        String::new()
+                    },
+                )
+            } else {
+                let spaces = after_semicolon.len() - after_spaces.len();
+                (
+                    token.span.offset,
+                    token.span.length + spaces,
+                    format!("\n{}", indent),
+                )
+            };
+
+            let mut replacements = vec![Replacement {
+                offset,
+                length: replace_len,
+                new_text,
+            }];
+            if ends_statement && line_ending.is_empty() {
+                // Keep the trailing-space deletion separate, so the ordinary
+                // trailing-whitespace fix can coexist instead of displacing
+                // removal of the semicolon as an overlapping narrower edit.
+                let trailing_spaces = after_semicolon.len() - after_spaces.len();
+                if trailing_spaces > 0 {
+                    replacements[0].length -= trailing_spaces;
+                    replacements.push(Replacement {
+                        offset: token.span.offset + token.span.length,
+                        length: trailing_spaces,
+                        new_text: String::new(),
+                    });
                 }
             }
 
@@ -604,11 +599,7 @@ pub fn check_one_statement_per_line(
                     &file.path,
                 )
                 .with_fix(Fix {
-                    replacements: vec![Replacement {
-                        offset: token.span.offset,
-                        length: replace_len,
-                        new_text: format!("\n{}", indent),
-                    }],
+                    replacements,
                     is_safe: true,
                 }),
             );

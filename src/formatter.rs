@@ -64,49 +64,81 @@ fn format_pass(source: &str, config: &Config) -> String {
     //    output is re-parsed to verify it has the same set of class members
     //    as the input: if anything mutated, we keep the original.
     if config.is_rule_enabled("order/class-member-order") {
-        result = safe_reorder_class_members(&result);
-        result = reorder_inner_classes(&result);
+        result = safe_reorder_class_members(&result, config.is_rule_enabled("format/blank-lines"));
+        result = reorder_inner_classes(&result, config.is_rule_enabled("format/blank-lines"));
     }
 
     // 2. Normalize indentation.
-    result = normalize_indentation(&result, config);
+    if config.is_rule_enabled("format/no-tabs-as-spaces") {
+        result = normalize_indentation(&result, config);
+    }
 
     // 2. Strip trailing whitespace from every line.
-    result = strip_trailing_whitespace(&result);
+    if config.is_rule_enabled("format/trailing-whitespace") {
+        result = strip_trailing_whitespace(&result);
+    }
 
     // 3a. Normalize blank lines BETWEEN top-level class members to their
     //     canonical counts (0 between header items, 1 between member
     //     categories, 2 around functions / inner classes). This is the
     //     member-aware pass; it understands what each top-level statement is.
-    result = normalize_member_spacing(&result);
+    if config.is_rule_enabled("format/blank-lines") {
+        result = normalize_member_spacing(&result);
+    }
 
     // 3b. Backstop for blank lines INSIDE function bodies and anywhere the
     //     member-aware pass didn't touch: collapse 3+ to 2.
-    result = collapse_blank_lines(&result);
+    if config.is_rule_enabled("format/blank-lines") {
+        result = collapse_blank_lines(&result);
+    }
 
     // 4. Replace && || ! with and or not.
-    result = normalize_boolean_operators(&result);
+    if config.is_rule_enabled("format/boolean-operators") {
+        result = normalize_boolean_operators(&result);
+    }
 
     // 5. Normalize quotes (single -> double unless contains double quotes).
-    result = normalize_quotes(&result);
+    if config.is_rule_enabled("format/double-quotes") {
+        result = normalize_quotes(&result);
+    }
 
     // 6. Normalize comment spacing (add space after #, except #region/#endregion).
-    result = normalize_comment_spacing(&result);
+    if config.is_rule_enabled("format/comment-spacing") {
+        result = normalize_comment_spacing(&result);
+    }
 
     // 7. Normalize float literals (add leading/trailing zeros).
-    result = normalize_float_literals(&result);
+    if config.is_rule_enabled("format/float-literal-zeros") {
+        result = normalize_float_literals(&result);
+    }
 
     // 8. Normalize hex to lowercase.
-    result = normalize_hex_literals(&result);
+    if config.is_rule_enabled("format/number-literals") {
+        result = normalize_hex_literals(&result);
+    }
 
     // 9. Ensure file ends with exactly one \n.
-    result = ensure_trailing_newline(&result);
+    if config.is_rule_enabled("format/trailing-newline") {
+        if config.is_rule_enabled("format/blank-lines") {
+            result = ensure_trailing_newline(&result);
+        } else if !result.is_empty() && !result.ends_with('\n') {
+            result.push('\n');
+        }
+    }
 
     // 10. Use lint+fix for remaining token-based transformations.
     result = lint_then_fix(&result, config);
 
     // 11. Break long lines by wrapping at commas inside delimiters.
-    result = break_long_lines(&result, config);
+    if config.is_rule_enabled("format/max-line-length") {
+        result = break_long_lines(&result, config);
+    }
+
+    // Member layout and reordering can append a newline while reconstructing
+    // blocks. Preserve an absent final newline when its rule is disabled.
+    if !config.is_rule_enabled("format/trailing-newline") && !source.ends_with('\n') {
+        result.truncate(result.trim_end_matches('\n').len());
+    }
 
     result
 }
@@ -990,14 +1022,11 @@ fn try_break_line(line: &str, config: &Config) -> Option<Vec<String>> {
             return None;
         }
     }
-    let allows_trailing_comma = true;
+    let allows_trailing_comma =
+        config.is_rule_enabled("format/trailing-comma") || inner.trim_end().ends_with(',');
 
     // Build the item indent: one tab deeper than the line's indentation.
-    let item_indent = if config.use_tabs {
-        format!("{}\t", indent)
-    } else {
-        format!("{}    ", indent)
-    };
+    let item_indent = continuation_indent(&indent, 1, config);
 
     let mut broken: Vec<String> = Vec::new();
     broken.push(format!("{}{}", indent, prefix));
@@ -1017,6 +1046,18 @@ fn try_break_line(line: &str, config: &Config) -> Option<Vec<String>> {
     broken.push(format!("{}{}", indent, suffix));
 
     Some(broken)
+}
+
+/// Extend a code line's indent without changing its style when indentation
+/// normalization is disabled. Unindented code has no style to preserve.
+fn continuation_indent(indent: &str, levels: usize, config: &Config) -> String {
+    let use_tabs = if config.is_rule_enabled("format/no-tabs-as-spaces") || indent.is_empty() {
+        config.use_tabs
+    } else {
+        indent.ends_with('\t')
+    };
+    let unit = if use_tabs { "\t" } else { "    " };
+    format!("{}{}", indent, unit.repeat(levels))
 }
 
 /// Track whether the scanner is currently inside a string literal, including
@@ -1251,11 +1292,7 @@ fn try_break_at_bool_operators(line: &str, config: &Config) -> Option<Vec<String
     }
 
     // Wrap condition in parentheses with each part on its own line.
-    let cont_indent = if config.use_tabs {
-        format!("{}\t\t", indent)
-    } else {
-        format!("{}        ", indent)
-    };
+    let cont_indent = continuation_indent(&indent, 2, config);
 
     let mut broken: Vec<String> = Vec::new();
     broken.push(format!("{}{} ({}", indent, keyword, parts[0].trim()));
@@ -1379,7 +1416,7 @@ fn split_at_bool_operators(condition: &str) -> Vec<String> {
 /// would risk changing program semantics, and verifies the output is
 /// structurally equivalent to the input. Returns the original source if the
 /// reorder would be unsafe or appears to have lost/mutated members.
-fn safe_reorder_class_members(source: &str) -> String {
+fn safe_reorder_class_members(source: &str, normalize_spacing: bool) -> String {
     let original_members = parse_members(source);
     // Region markers and inspector section markers delimit semantic groups.
     // Preserve their member order, including inside nested classes.
@@ -1410,6 +1447,11 @@ fn safe_reorder_class_members(source: &str) -> String {
     }
 
     let reordered = reorder_class_members(source);
+    let reordered = if normalize_spacing {
+        reordered
+    } else {
+        preserve_member_gaps(source, &reordered)
+    };
     if reordered == source {
         return reordered;
     }
@@ -1423,6 +1465,46 @@ fn safe_reorder_class_members(source: &str) -> String {
         return source.to_string();
     }
     reordered
+}
+
+/// Keep separator gaps in their source slots when ordering is enabled but
+/// blank-line formatting is off. Moving a declaration must not normalize its gaps.
+fn preserve_member_gaps(original: &str, reordered: &str) -> String {
+    fn gaps(source: &str, lines: &[&str]) -> Vec<(usize, usize)> {
+        let members = parse_members(source);
+        let anchors = collect_member_anchors(&members, lines);
+        let starts = compute_attached_starts(&anchors, lines);
+        let mut gaps = Vec::new();
+        for index in 1..starts.len() {
+            let end = starts[index];
+            let mut start = end;
+            let boundary = anchors[index - 1].0 + 1;
+            while start > boundary && lines[start - 1].trim().is_empty() {
+                start -= 1;
+            }
+            gaps.push((start, end));
+        }
+        let mut tail = lines.len();
+        while tail > 0 && lines[tail - 1].trim().is_empty() {
+            tail -= 1;
+        }
+        gaps.push((tail, lines.len()));
+        gaps
+    }
+    let original_lines: Vec<_> = original.split('\n').collect();
+    let mut reordered_lines: Vec<_> = reordered.split('\n').collect();
+    let old_gaps = gaps(original, &original_lines);
+    let new_gaps = gaps(reordered, &reordered_lines);
+    if old_gaps.len() != new_gaps.len() {
+        return original.to_string();
+    }
+    for ((old_start, old_end), (new_start, new_end)) in old_gaps.into_iter().zip(new_gaps).rev() {
+        reordered_lines.splice(
+            new_start..new_end,
+            original_lines[old_start..old_end].iter().copied(),
+        );
+    }
+    reordered_lines.join("\n")
 }
 
 fn parse_members(source: &str) -> Vec<ClassMember> {
@@ -1942,7 +2024,7 @@ fn move_class_decl_before_doc_comments(source: &str) -> String {
 }
 
 /// Find inner class blocks in the source and recursively reorder their members.
-fn reorder_inner_classes(source: &str) -> String {
+fn reorder_inner_classes(source: &str, normalize_spacing: bool) -> String {
     let strings = string_lines(source);
     let lines: Vec<&str> = source.split('\n').collect();
     let mut result: Vec<String> = Vec::new();
@@ -2000,6 +2082,22 @@ fn reorder_inner_classes(source: &str) -> String {
             let body_end = i;
 
             if body_start < body_end {
+                // Keep the body's actual indent while reordering. Indentation
+                // conversion belongs to format/no-tabs-as-spaces, which may be off.
+                let member_indent = lines[body_start..body_end]
+                    .iter()
+                    .enumerate()
+                    .find(|(offset, line)| {
+                        !strings.is_interior(body_start + offset)
+                            && !line.trim().is_empty()
+                            && !line.trim_start().starts_with('#')
+                    })
+                    .map(|(_, line)| {
+                        line.chars()
+                            .take_while(|c| matches!(c, ' ' | '\t'))
+                            .collect::<String>()
+                    })
+                    .unwrap_or_else(|| format!("{}\t", indent));
                 // Extract body, dedent by one level, reorder, re-indent.
                 let body_lines: Vec<String> = lines[body_start..body_end]
                     .iter()
@@ -2009,12 +2107,8 @@ fn reorder_inner_classes(source: &str) -> String {
                             l.to_string()
                         } else if l.trim().is_empty() {
                             String::new()
-                        } else if l.starts_with(&format!("{}\t", indent)) {
-                            l[indent.len() + 1..].to_string()
-                        } else if l.starts_with(&format!("{}    ", indent)) {
-                            l[indent.len() + 4..].to_string()
-                        } else if l.len() > indent.len() {
-                            l[indent.len()..].to_string()
+                        } else if let Some(dedented) = l.strip_prefix(&member_indent) {
+                            dedented.to_string()
                         } else {
                             l.to_string()
                         }
@@ -2025,10 +2119,9 @@ fn reorder_inner_classes(source: &str) -> String {
                 // Use the safe wrapper so inner classes get the same guards
                 // as the file-level reorder (no member loss, no reordering
                 // when initialisers cross-reference).
-                let reordered = safe_reorder_class_members(&dedented_body);
+                let reordered = safe_reorder_class_members(&dedented_body, normalize_spacing);
 
                 // Re-indent and add to result.
-                let member_indent = format!("{}\t", indent);
                 let reordered_strings = string_lines(&reordered);
                 for (index, line) in reordered.split('\n').enumerate() {
                     if reordered_strings.is_interior(index) {

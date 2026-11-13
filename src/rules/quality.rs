@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use crate::ast::{for_each_member, ClassMember, ScriptFile};
 use crate::config::Config;
@@ -8,13 +8,6 @@ use crate::token::{Span, Token, TokenKind};
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// Returns the indentation level (number of leading tabs or spaces) of a line.
-fn indent_level(line: &str) -> usize {
-    line.chars()
-        .take_while(|ch| *ch == '\t' || *ch == ' ')
-        .count()
-}
 
 /// Returns the body lines (0-indexed into `file.lines`) for a function.
 /// `span.line` is 1-indexed; the body starts on the line after the signature.
@@ -26,56 +19,6 @@ fn function_body_range(
     let start = span.line; // 0-indexed: line after the `func` line
     let end = (start + body_line_count).min(total_lines);
     start..end
-}
-
-/// Check if a trimmed line is purely a comment or blank.
-fn is_comment_or_blank(trimmed: &str) -> bool {
-    trimmed.is_empty() || trimmed.starts_with('#')
-}
-
-/// Return a copy of `line` with string-literal contents and any trailing
-/// comment replaced by spaces, preserving byte length so column offsets
-/// stay valid. Used by the line-based quality rules so a keyword appearing
-/// inside a string literal (`var s = " await "`) isn't mistaken for code.
-fn blank_strings_and_comments(line: &str) -> String {
-    let mut out = String::with_capacity(line.len());
-    let mut in_string: Option<char> = None;
-    let mut escaped = false;
-    for ch in line.chars() {
-        match in_string {
-            Some(quote) => {
-                // Inside a string: blank everything (including the content),
-                // keep the closing quote so structure is still visible.
-                if escaped {
-                    escaped = false;
-                    out.push(' ');
-                } else if ch == '\\' {
-                    escaped = true;
-                    out.push(' ');
-                } else if ch == quote {
-                    in_string = None;
-                    out.push(ch);
-                } else {
-                    out.push(' ');
-                }
-            }
-            None => {
-                if ch == '"' || ch == '\'' {
-                    in_string = Some(ch);
-                    out.push(ch);
-                } else if ch == '#' {
-                    // Rest of the line is a comment, blank it and stop.
-                    for _ in 0..(line.len() - out.len()) {
-                        out.push(' ');
-                    }
-                    break;
-                } else {
-                    out.push(ch);
-                }
-            }
-        }
-    }
-    out
 }
 
 // ---------------------------------------------------------------------------
@@ -166,94 +109,12 @@ pub fn check_max_parameters(file: &ScriptFile, config: &Config, diagnostics: &mu
 /// A lone `pass` in an otherwise-empty function is fine; `pass` alongside
 /// other statements is unnecessary.
 pub fn check_unnecessary_pass_in_functions(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    check_unnecessary_pass_fns_recursive(&file.members, file, diagnostics);
-}
-
-/// True if the `pass` statement at `code_lines[pass_pos]` has a sibling
-/// statement at the same indentation within the same enclosing block,
-/// meaning the `pass` is genuinely redundant. A `pass` that is alone in its
-/// block (a `match` arm body, an otherwise-empty `if`/`for`/`while` body) is
-/// required and must not be flagged.
-///
-/// `code_lines` is the function's non-blank, non-comment lines as
-/// `(line_index, text)` pairs.
-fn pass_has_sibling_statement(code_lines: &[(usize, &str)], pass_pos: usize) -> bool {
-    let pass_indent = indent_level(code_lines[pass_pos].1);
-
-    // Scan outward in both directions. A line at the same indent inside the
-    // same block is a sibling; a line at a lower indent closes the block.
-    let mut has_sibling = false;
-    // Backward.
-    for (_, line) in code_lines[..pass_pos].iter().rev() {
-        let indent = indent_level(line);
-        if indent < pass_indent {
-            break;
-        }
-        if indent == pass_indent {
-            has_sibling = true;
-            break;
-        }
-    }
-    if has_sibling {
-        return true;
-    }
-    // Forward.
-    for (_, line) in &code_lines[pass_pos + 1..] {
-        let indent = indent_level(line);
-        if indent < pass_indent {
-            break;
-        }
-        if indent == pass_indent {
-            return true;
-        }
-    }
-    false
-}
-
-fn check_unnecessary_pass_fns_recursive(
-    members: &[ClassMember],
-    file: &ScriptFile,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for_each_member(members, |member| {
-        let ClassMember::Function {
-            body_line_count,
-            span,
-            ..
-        } = member
-        else {
-            return;
-        };
-        let range = function_body_range(span, *body_line_count, file.lines.len());
-
-        // Body lines that carry code, as (absolute line index, text).
-        let code_lines: Vec<(usize, &str)> = file.lines[range.clone()]
-            .iter()
-            .enumerate()
-            .filter(|(_, l)| !is_comment_or_blank(l.trim()))
-            .map(|(i, l)| (range.start + i, l.as_str()))
-            .collect();
-
-        if code_lines.len() <= 1 {
-            // Only `pass` or empty, that's fine.
-            return;
-        }
-
-        // Flag a `pass` only when it has a sibling statement in the same
-        // block. A `pass` that is the *sole* statement of its block (a
-        // `match` arm, an `if`/`else`/`for`/`while` body that would
-        // otherwise be empty) is required, not redundant.
-        for (pos, (line_idx, line)) in code_lines.iter().enumerate() {
-            if line.trim() == "pass" && pass_has_sibling_statement(&code_lines, pos) {
-                diagnostics.push(Diagnostic::warning(
-                    "quality/unnecessary-pass",
-                    "unnecessary 'pass' statement".to_string(),
-                    Span::new(line_idx + 1, 1, 0, 0),
-                    &file.path,
-                ));
-            }
-        }
-    });
+    check_structural_rule(
+        file,
+        &Config::default(),
+        "quality/unnecessary-pass",
+        diagnostics,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1098,258 +959,34 @@ fn visit_syntax(node: tree_sitter::Node<'_>, visit: &mut impl FnMut(tree_sitter:
 // New rule 13: unreachable-code
 // ---------------------------------------------------------------------------
 
-/// Returns the net `(`+`[`+`{` minus `)`+`]`+`}` count on a single line,
-/// ignoring delimiters inside string literals and trailing `#` comments.
-/// Used by `check_unreachable_code` to skip continuation lines of a
-/// multi-line `return`/`break`/`continue` statement.
-fn line_bracket_delta(line: &str) -> i32 {
-    let mut depth: i32 = 0;
-    let mut chars = line.chars().peekable();
-    let mut in_string: Option<char> = None; // ' or " of the current string
-    while let Some(ch) = chars.next() {
-        // Inside a string literal: only the matching quote ends it, and
-        // a backslash escapes the next char.
-        if let Some(q) = in_string {
-            if ch == '\\' {
-                chars.next();
-                continue;
-            }
-            if ch == q {
-                in_string = None;
-            }
-            continue;
-        }
-        match ch {
-            '#' => break, // rest of line is a comment
-            '"' | '\'' => in_string = Some(ch),
-            '(' | '[' | '{' => depth += 1,
-            ')' | ']' | '}' => depth -= 1,
-            _ => {}
-        }
-    }
-    depth
-}
-
-/// Returns true if `line` ends with a backslash continuation (any trailing
-/// whitespace after the backslash is allowed but a backslash inside a
-/// string or before a comment doesn't count).
-fn ends_with_backslash_continuation(line: &str) -> bool {
-    // Strip trailing comment first.
-    let no_comment = strip_trailing_comment(line);
-    no_comment.trim_end().ends_with('\\')
-}
-
-/// Strip the trailing `# ...` comment from a line, respecting strings.
-fn strip_trailing_comment(line: &str) -> &str {
-    let mut in_string: Option<char> = None;
-    let bytes = line.as_bytes();
-    let mut i = 0;
-    while i < bytes.len() {
-        let ch = bytes[i] as char;
-        if let Some(q) = in_string {
-            if ch == '\\' {
-                i += 2;
-                continue;
-            }
-            if ch == q {
-                in_string = None;
-            }
-            i += 1;
-            continue;
-        }
-        match ch {
-            '"' | '\'' => in_string = Some(ch),
-            '#' => return &line[..i],
-            _ => {}
-        }
-        i += 1;
-    }
-    line
-}
-
-/// Warn about code that appears after `return`, `break`, or `continue` at the
-/// same indentation level within a block.
+/// Warn about statements after a direct return, break, or continue in the same body.
 pub fn check_unreachable_code(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    let mut reported: HashSet<usize> = HashSet::new();
-
-    let mut i = 0;
-    while i < file.lines.len() {
-        let line = &file.lines[i];
-        let trimmed = line.trim();
-        if !(trimmed.starts_with("return") || trimmed == "break" || trimmed == "continue") {
-            i += 1;
-            continue;
-        }
-
-        // `return` can be `return`, `return <expr>`, or `return(expr)`
-        // (the latter is rare but legal). Anything else with a `return`
-        // prefix (e.g. `return_value`, `returns`, `returnable`) is an
-        // identifier and not a return statement.
-        if trimmed.starts_with("return") && trimmed.len() > 6 {
-            let rest = &trimmed[6..];
-            let next = rest.chars().next().unwrap_or('\0');
-            if !matches!(next, ' ' | '\t' | '(') {
-                i += 1;
-                continue;
-            }
-        }
-
-        let stmt_indent = indent_level(line);
-
-        // The terminator statement can itself span multiple lines via
-        // unclosed brackets (`return floori(\n\t\t1.2\n\t)`) or a
-        // backslash continuation. Walk forward through every line that
-        // is logically part of the same statement before scanning for
-        // unreachable code. Without this, the closing `)` of a
-        // multi-line return is at the same indent as `return` and gets
-        // flagged as "unreachable" even though it's the same statement.
-        let mut depth = line_bracket_delta(line);
-        let mut prev_backslash = ends_with_backslash_continuation(line);
-        let mut stmt_end = i;
-        while (depth > 0 || prev_backslash) && stmt_end + 1 < file.lines.len() {
-            stmt_end += 1;
-            let cont = &file.lines[stmt_end];
-            depth += line_bracket_delta(cont);
-            prev_backslash = ends_with_backslash_continuation(cont);
-        }
-
-        // Now scan from the line AFTER the statement ends.
-        for j in (stmt_end + 1)..file.lines.len() {
-            let next = &file.lines[j];
-            let next_trimmed = next.trim();
-
-            if next_trimmed.is_empty() || next_trimmed.starts_with('#') {
-                continue;
-            }
-
-            let next_indent = indent_level(next);
-
-            if next_indent < stmt_indent {
-                // We've left the block
-                break;
-            }
-
-            if next_indent == stmt_indent && !reported.contains(&j) {
-                // This is at the same level, it's unreachable
-                // But skip if it's an elif/else/except (those are sibling branches)
-                if next_trimmed.starts_with("elif ")
-                    || next_trimmed.starts_with("elif(")
-                    || next_trimmed == "else:"
-                    || next_trimmed.starts_with("else:")
-                {
-                    break;
-                }
-                reported.insert(j);
-                diagnostics.push(Diagnostic::warning(
-                    "quality/unreachable-code",
-                    "unreachable code".to_string(),
-                    Span::new(j + 1, 1, 0, 0),
-                    &file.path,
-                ));
-                break; // One diagnostic per unreachable block
-            }
-        }
-
-        // Advance past the (possibly multi-line) statement we just
-        // analysed so we don't re-enter the same return on continuation
-        // lines that start with `return` substring.
-        i = stmt_end + 1;
-    }
+    check_structural_rule(
+        file,
+        &Config::default(),
+        "quality/unreachable-code",
+        diagnostics,
+    );
 }
 
-// ---------------------------------------------------------------------------
-// New rule 14: await-in-loop
-// ---------------------------------------------------------------------------
-
-/// Warn when `await` is used inside a `for` or `while` loop.
+/// Warn when an await expression is executed inside a loop.
 pub fn check_await_in_loop(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    // Track loop indent levels using a stack
-    let mut loop_indents: Vec<usize> = Vec::new();
-
-    for (i, line) in file.lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let line_indent = indent_level(line);
-
-        // Pop loops that we've exited
-        while let Some(&loop_indent) = loop_indents.last() {
-            if line_indent <= loop_indent {
-                loop_indents.pop();
-            } else {
-                break;
-            }
-        }
-
-        // Detect loop starts
-        if trimmed.starts_with("for ") || trimmed.starts_with("while ") || trimmed == "while true:"
-        {
-            loop_indents.push(line_indent);
-            continue;
-        }
-
-        // Check for await inside a loop. Match against a string-blanked copy
-        // so `var s = " await "` inside a loop doesn't false-positive.
-        let code = blank_strings_and_comments(line);
-        let code_trimmed = code.trim();
-        if !loop_indents.is_empty()
-            && (code_trimmed.starts_with("await ")
-                || code_trimmed.contains(" await ")
-                || code_trimmed.starts_with("await("))
-        {
-            diagnostics.push(Diagnostic::warning(
-                "quality/await-in-loop",
-                "'await' used inside a loop".to_string(),
-                Span::new(i + 1, 1, 0, 0),
-                &file.path,
-            ));
-        }
-    }
+    check_structural_rule(
+        file,
+        &Config::default(),
+        "quality/await-in-loop",
+        diagnostics,
+    );
 }
 
-// ---------------------------------------------------------------------------
-// New rule 15: allocation-in-loop
-// ---------------------------------------------------------------------------
-
-/// Warn about object allocations (`.new()`) inside loops.
+/// Warn when a constructor call is executed inside a loop.
 pub fn check_allocation_in_loop(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    let mut loop_indents: Vec<usize> = Vec::new();
-
-    for (i, line) in file.lines.iter().enumerate() {
-        let trimmed = line.trim();
-        if trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-
-        let line_indent = indent_level(line);
-
-        while let Some(&loop_indent) = loop_indents.last() {
-            if line_indent <= loop_indent {
-                loop_indents.pop();
-            } else {
-                break;
-            }
-        }
-
-        if trimmed.starts_with("for ") || trimmed.starts_with("while ") || trimmed == "while true:"
-        {
-            loop_indents.push(line_indent);
-            continue;
-        }
-
-        // Match against a string-blanked copy so `.new(` inside a string
-        // literal doesn't false-positive.
-        if !loop_indents.is_empty() && blank_strings_and_comments(line).contains(".new(") {
-            diagnostics.push(Diagnostic::warning(
-                "quality/allocation-in-loop",
-                "object allocation '.new()' inside a loop".to_string(),
-                Span::new(i + 1, 1, 0, 0),
-                &file.path,
-            ));
-        }
-    }
+    check_structural_rule(
+        file,
+        &Config::default(),
+        "quality/allocation-in-loop",
+        diagnostics,
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -1424,168 +1061,18 @@ pub fn check_max_nesting_depth(
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    check_nesting_recursive(&file.members, file, config, diagnostics);
+    check_structural_rule(file, config, "quality/max-nesting-depth", diagnostics);
 }
-
-fn check_nesting_recursive(
-    members: &[ClassMember],
-    file: &ScriptFile,
-    config: &Config,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for_each_member(members, |member| {
-        let ClassMember::Function {
-            name,
-            body_line_count,
-            span,
-            ..
-        } = member
-        else {
-            return;
-        };
-        if *body_line_count == 0 {
-            return;
-        }
-        let range = function_body_range(span, *body_line_count, file.lines.len());
-        // The body's base indent is the shallowest non-empty body line.
-        let base_indent = file.lines[range.clone()]
-            .iter()
-            .filter(|l| !l.trim().is_empty())
-            .map(|l| indent_level(l))
-            .min()
-            .unwrap_or(0);
-
-        let mut max_depth = 0;
-        let mut max_depth_line = range.start;
-        for idx in range {
-            let trimmed = file.lines[idx].trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
-                continue;
-            }
-            let depth = indent_level(&file.lines[idx]).saturating_sub(base_indent);
-            if depth > max_depth {
-                max_depth = depth;
-                max_depth_line = idx;
-            }
-        }
-
-        if max_depth > config.max_nesting_depth {
-            diagnostics.push(Diagnostic::warning(
-                "quality/max-nesting-depth",
-                format!(
-                    "function '{}' has nesting depth {} (max {})",
-                    name, max_depth, config.max_nesting_depth
-                ),
-                Span::new(max_depth_line + 1, 1, 0, 0),
-                &file.path,
-            ));
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// New rule 18: max-returns
-// ---------------------------------------------------------------------------
 
 /// Warn when a function has too many return statements.
 pub fn check_max_returns(file: &ScriptFile, config: &Config, diagnostics: &mut Vec<Diagnostic>) {
-    check_returns_recursive(&file.members, file, config, diagnostics);
+    check_structural_rule(file, config, "quality/max-returns", diagnostics);
 }
 
-fn check_returns_recursive(
-    members: &[ClassMember],
-    file: &ScriptFile,
-    config: &Config,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for_each_member(members, |member| {
-        let ClassMember::Function {
-            name,
-            body_line_count,
-            span,
-            ..
-        } = member
-        else {
-            return;
-        };
-        let range = function_body_range(span, *body_line_count, file.lines.len());
-        let count = file.lines[range]
-            .iter()
-            .filter(|l| {
-                let t = l.trim();
-                t == "return" || t.starts_with("return ")
-            })
-            .count();
-
-        if count > config.max_returns {
-            diagnostics.push(Diagnostic::warning(
-                "quality/max-returns",
-                format!(
-                    "function '{}' has {} return statements (max {})",
-                    name, count, config.max_returns
-                ),
-                *span,
-                &file.path,
-            ));
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// New rule 19: max-branches
-// ---------------------------------------------------------------------------
-
-/// Warn when a function has too many branches (if/elif/match).
+/// Warn when a function has too many if/elif/match branches.
 pub fn check_max_branches(file: &ScriptFile, config: &Config, diagnostics: &mut Vec<Diagnostic>) {
-    check_branches_recursive(&file.members, file, config, diagnostics);
+    check_structural_rule(file, config, "quality/max-branches", diagnostics);
 }
-
-fn check_branches_recursive(
-    members: &[ClassMember],
-    file: &ScriptFile,
-    config: &Config,
-    diagnostics: &mut Vec<Diagnostic>,
-) {
-    for_each_member(members, |member| {
-        let ClassMember::Function {
-            name,
-            body_line_count,
-            span,
-            ..
-        } = member
-        else {
-            return;
-        };
-        let range = function_body_range(span, *body_line_count, file.lines.len());
-        let count = file.lines[range]
-            .iter()
-            .filter(|l| {
-                let t = l.trim();
-                t.starts_with("if ")
-                    || t.starts_with("if(")
-                    || t.starts_with("elif ")
-                    || t.starts_with("elif(")
-                    || t.starts_with("match ")
-            })
-            .count();
-
-        if count > config.max_branches {
-            diagnostics.push(Diagnostic::warning(
-                "quality/max-branches",
-                format!(
-                    "function '{}' has {} branches (max {})",
-                    name, count, config.max_branches
-                ),
-                *span,
-                &file.path,
-            ));
-        }
-    });
-}
-
-// ---------------------------------------------------------------------------
-// New rule 20: max-local-variables
-// ---------------------------------------------------------------------------
 
 /// Warn when a function declares too many local variables.
 pub fn check_max_local_variables(
@@ -1593,43 +1080,260 @@ pub fn check_max_local_variables(
     config: &Config,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    check_local_vars_recursive(&file.members, file, config, diagnostics);
+    check_structural_rule(file, config, "quality/max-local-variables", diagnostics);
 }
 
-fn check_local_vars_recursive(
-    members: &[ClassMember],
+fn check_structural_rule(
     file: &ScriptFile,
     config: &Config,
+    rule: &str,
     diagnostics: &mut Vec<Diagnostic>,
 ) {
-    for_each_member(members, |member| {
-        let ClassMember::Function {
-            name,
-            body_line_count,
-            span,
-            ..
-        } = member
-        else {
-            return;
-        };
-        let range = function_body_range(span, *body_line_count, file.lines.len());
-        let count = file.lines[range]
-            .iter()
-            .filter(|l| l.trim().starts_with("var "))
-            .count();
+    let source = file.lines.join("\n");
+    if let Some(document) = crate::syntax::SyntaxDocument::parse(&source) {
+        check_structural_quality(file, config, &document, Some(rule), diagnostics);
+    }
+}
 
-        if count > config.max_local_variables {
-            diagnostics.push(Diagnostic::warning(
-                "quality/max-local-variables",
-                format!(
-                    "function '{}' has {} local variables (max {})",
-                    name, count, config.max_local_variables
-                ),
-                *span,
-                &file.path,
-            ));
+/// Run structural quality checks against the linter's existing syntax tree.
+pub(crate) fn check_structural_quality(
+    file: &ScriptFile,
+    config: &Config,
+    document: &crate::syntax::SyntaxDocument<'_>,
+    only_rule: Option<&str>,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let enabled =
+        |rule: &str| only_rule.map_or_else(|| config.is_rule_enabled(rule), |only| only == rule);
+    if ![
+        "quality/unnecessary-pass",
+        "quality/unreachable-code",
+        "quality/await-in-loop",
+        "quality/allocation-in-loop",
+        "quality/max-nesting-depth",
+        "quality/max-returns",
+        "quality/max-branches",
+        "quality/max-local-variables",
+    ]
+    .iter()
+    .any(|rule| enabled(rule))
+    {
+        return;
+    }
+    scan_quality_nodes(
+        document.root_node(),
+        0,
+        file,
+        document.source(),
+        config,
+        &enabled,
+        diagnostics,
+    );
+}
+
+fn syntax_span(node: tree_sitter::Node<'_>) -> Span {
+    Span::new(
+        node.start_position().row + 1,
+        1,
+        node.start_byte(),
+        node.end_byte() - node.start_byte(),
+    )
+}
+
+fn scan_quality_nodes(
+    node: tree_sitter::Node<'_>,
+    loop_depth: usize,
+    file: &ScriptFile,
+    source: &str,
+    config: &Config,
+    enabled: &impl Fn(&str) -> bool,
+    diagnostics: &mut Vec<Diagnostic>,
+) {
+    let loop_depth = if matches!(node.kind(), "lambda" | "function_definition") {
+        0
+    } else {
+        loop_depth
+    };
+    if node.kind() == "body"
+        && (enabled("quality/unnecessary-pass") || enabled("quality/unreachable-code"))
+    {
+        let mut cursor = node.walk();
+        let statements: Vec<_> = node
+            .named_children(&mut cursor)
+            .filter(|n| !matches!(n.kind(), "comment" | "region_start" | "region_end"))
+            .collect();
+        if enabled("quality/unnecessary-pass") && statements.len() > 1 {
+            for statement in &statements {
+                if statement.kind() == "pass_statement" {
+                    diagnostics.push(Diagnostic::warning(
+                        "quality/unnecessary-pass",
+                        "unnecessary 'pass' statement".into(),
+                        syntax_span(*statement),
+                        &file.path,
+                    ));
+                }
+            }
         }
-    });
+        if enabled("quality/unreachable-code") {
+            if let Some(terminal) = statements.iter().position(|n| {
+                matches!(
+                    n.kind(),
+                    "return_statement" | "break_statement" | "continue_statement"
+                )
+            }) {
+                if let Some(unreachable) = statements.get(terminal + 1) {
+                    diagnostics.push(Diagnostic::warning(
+                        "quality/unreachable-code",
+                        "unreachable code".into(),
+                        syntax_span(*unreachable),
+                        &file.path,
+                    ));
+                }
+            }
+        }
+    }
+    if loop_depth > 0 {
+        let rule = if node.kind() == "await_expression" {
+            Some(("quality/await-in-loop", "'await' used inside a loop"))
+        } else if node.kind() == "attribute_call"
+            && node
+                .named_child(0)
+                .is_some_and(|name| &source[name.byte_range()] == "new")
+        {
+            Some((
+                "quality/allocation-in-loop",
+                "object allocation '.new()' inside a loop",
+            ))
+        } else {
+            None
+        };
+        if let Some((rule, message)) = rule {
+            if enabled(rule) {
+                diagnostics.push(Diagnostic::warning(
+                    rule,
+                    message.into(),
+                    syntax_span(node),
+                    &file.path,
+                ));
+            }
+        }
+    }
+    if node.kind() == "function_definition"
+        && [
+            "quality/max-returns",
+            "quality/max-branches",
+            "quality/max-local-variables",
+            "quality/max-nesting-depth",
+        ]
+        .iter()
+        .any(|rule| enabled(rule))
+    {
+        if let (Some(name), Some(body)) = (
+            node.child_by_field_name("name"),
+            node.child_by_field_name("body"),
+        ) {
+            // Annotations can start above the declaration; diagnostics belong
+            // to the `func` keyword, matching the declaration projection.
+            let mut cursor = node.walk();
+            let declaration_span = node
+                .children(&mut cursor)
+                .find(|child| child.kind() == "func")
+                .map_or_else(|| syntax_span(name), syntax_span);
+            let mut stats = FunctionStats::default();
+            function_stats(body, 0, &mut stats);
+            for (rule, count, limit, noun) in [
+                (
+                    "quality/max-returns",
+                    stats.returns,
+                    config.max_returns,
+                    "return statements",
+                ),
+                (
+                    "quality/max-branches",
+                    stats.branches,
+                    config.max_branches,
+                    "branches",
+                ),
+                (
+                    "quality/max-local-variables",
+                    stats.locals,
+                    config.max_local_variables,
+                    "local variables",
+                ),
+            ] {
+                if enabled(rule) && count > limit {
+                    diagnostics.push(Diagnostic::warning(
+                        rule,
+                        format!(
+                            "function '{}' has {} {} (max {})",
+                            &source[name.byte_range()],
+                            count,
+                            noun,
+                            limit
+                        ),
+                        declaration_span,
+                        &file.path,
+                    ));
+                }
+            }
+            if enabled("quality/max-nesting-depth") && stats.max_depth > config.max_nesting_depth {
+                diagnostics.push(Diagnostic::warning(
+                    "quality/max-nesting-depth",
+                    format!(
+                        "function '{}' has nesting depth {} (max {})",
+                        &source[name.byte_range()],
+                        stats.max_depth,
+                        config.max_nesting_depth
+                    ),
+                    Span::new(stats.depth_line, 1, 0, 0),
+                    &file.path,
+                ));
+            }
+        }
+    }
+    let loop_body = matches!(node.kind(), "for_statement" | "while_statement")
+        .then(|| node.child_by_field_name("body"))
+        .flatten();
+    // A for iterable is evaluated once; a while condition is re-evaluated
+    // on every iteration, so await/allocation there are loop operations too.
+    let loop_condition = (node.kind() == "while_statement")
+        .then(|| node.child_by_field_name("condition"))
+        .flatten();
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        let depth =
+            loop_depth + usize::from(loop_body == Some(child) || loop_condition == Some(child));
+        scan_quality_nodes(child, depth, file, source, config, enabled, diagnostics);
+    }
+}
+
+#[derive(Default)]
+struct FunctionStats {
+    returns: usize,
+    branches: usize,
+    locals: usize,
+    max_depth: usize,
+    depth_line: usize,
+}
+
+fn function_stats(node: tree_sitter::Node<'_>, depth: usize, stats: &mut FunctionStats) {
+    if matches!(node.kind(), "lambda" | "function_definition") {
+        return;
+    }
+    match node.kind() {
+        "return_statement" => stats.returns += 1,
+        "if_statement" | "elif_clause" | "match_statement" => stats.branches += 1,
+        "variable_statement" => stats.locals += 1,
+        _ => {}
+    }
+    if !matches!(node.kind(), "body" | "comment") && depth > stats.max_depth {
+        stats.max_depth = depth;
+        stats.depth_line = node.start_position().row + 1;
+    }
+    let mut cursor = node.walk();
+    for child in node.named_children(&mut cursor) {
+        function_stats(child, depth + usize::from(child.kind() == "body"), stats);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -260,7 +260,10 @@ The formatter normalizes indentation, trailing whitespace, blank lines (includin
 
 Multiline strings keep their contents byte for byte, including indentation, blank lines,
 trailing spaces, and line endings. CRLF files keep CRLF line endings outside strings.
-Disabling `order/class-member-order` also disables formatter reordering. Files with
+Setting a formatting rule to `"off"` disables its formatter pass; other enabled
+rules still apply. `format/blank-lines` controls member spacing and blank-line
+cleanup, while `format/max-line-length` controls line wrapping. Disabling
+`order/class-member-order` also disables formatter reordering. Files with
 fold regions, warning regions, or inspector section markers retain their member order
 to preserve those boundaries.
 
@@ -373,6 +376,9 @@ gdstyle has two ways to silence a warning from source: **per-line** for
 spot exemptions and **per-file** for class- or file-scope rules. Both
 use a `# gdstyle:ignore` comment, with the same `=rule1,rule2` syntax
 for narrowing to specific rules.
+
+Directives must start an actual comment. The same text inside a string, a doc
+comment, or comment prose does not suppress diagnostics.
 
 | Directive | Scope | Form |
 |---|---|---|

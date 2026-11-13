@@ -213,11 +213,6 @@ pub fn apply_fixes(source: &str, diagnostics: &[Diagnostic], safe_only: bool) ->
     crate::linter::restore_line_endings(original_source, &fixed)
 }
 
-fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {
-    let result = apply_replacements_no_collapse(source, replacements);
-    collapse_blank_lines(&result)
-}
-
 /// Extract per-file rename records for cross-file reference tracking.
 ///
 /// `members` should be the parsed AST of the source file; it is used to
@@ -452,7 +447,7 @@ pub fn apply_cross_file_fixes(source: &str, refs: &[CrossFileReference]) -> Stri
             new_text: r.new_name.clone(),
         })
         .collect();
-    let fixed = apply_replacements_no_collapse(source, replacements);
+    let fixed = apply_replacements(source, replacements);
     if crate::syntax::is_valid(source) && !crate::syntax::is_valid(&fixed) {
         source.to_string()
     } else {
@@ -515,9 +510,8 @@ pub fn apply_scene_renames(
     (out_lines.join("\n"), applied)
 }
 
-/// Same as [`apply_replacements`] but doesn't run the blank-line collapse:
-/// cross-file rewrites don't restructure the file the way same-file fixes
-/// can.
+/// Apply only the requested edits. Blank-line cleanup belongs to its lint
+/// rule, so a disabled or suppressed rule cannot run as a side effect.
 ///
 /// Two phases:
 /// 1. **Overlap resolution.** Sort the replacements by length ascending so
@@ -534,14 +528,40 @@ pub fn apply_scene_renames(
 ///    an operator-spacing insertion adjacent to a string-literal
 ///    replacement comes out as `<insert>` followed by `<replaced text>`,
 ///    never inside it.
-fn apply_replacements_no_collapse(source: &str, replacements: Vec<Replacement>) -> String {
+fn apply_replacements(source: &str, replacements: Vec<Replacement>) -> String {
     if replacements.is_empty() {
         return source.to_string();
     }
 
     // Phase 1: pick a maximal set of non-overlapping replacements,
     // preferring narrower spans.
-    let mut by_width: Vec<&Replacement> = replacements.iter().collect();
+    // A deletion of whitespace-only lines makes narrower edits inside those
+    // lines redundant. Keep the deletion instead of a trailing-space fix
+    // that would otherwise displace it. Insertions at its edges still apply.
+    let whitespace_deletions: Vec<_> = replacements
+        .iter()
+        .filter(|r| {
+            r.length > 0
+                && r.new_text.is_empty()
+                && r.offset
+                    .checked_add(r.length)
+                    .and_then(|end| source.get(r.offset..end))
+                    .is_some_and(|text| text.chars().all(char::is_whitespace))
+        })
+        .collect();
+    let mut by_width: Vec<&Replacement> = replacements
+        .iter()
+        .filter(|r| {
+            !whitespace_deletions.iter().any(|deletion| {
+                let end = r.offset.saturating_add(r.length);
+                let deletion_end = deletion.offset + deletion.length;
+                deletion.length > r.length
+                    && deletion.offset <= r.offset
+                    && end <= deletion_end
+                    && (r.length > 0 || (r.offset > deletion.offset && r.offset < deletion_end))
+            })
+        })
+        .collect();
     by_width.sort_by_key(|r| r.length);
     let mut accepted: Vec<&Replacement> = Vec::with_capacity(by_width.len());
     for r in by_width {
@@ -1024,31 +1044,6 @@ fn find_enum_for_member(members: &[ClassMember], member_old_name: &str) -> Optio
         }
     }
     None
-}
-
-fn collapse_blank_lines(source: &str) -> String {
-    let mut result = String::with_capacity(source.len());
-    let strings =
-        crate::token::StringLines::new(&Lexer::new(source).tokenize(), source.split('\n').count());
-    let mut consecutive_empty = 0;
-    for (idx, line) in source.split('\n').enumerate() {
-        if line.trim().is_empty() && !strings.ends_inside(idx) {
-            consecutive_empty += 1;
-            if consecutive_empty <= 2 {
-                if !result.is_empty() {
-                    result.push('\n');
-                }
-                result.push_str(line);
-            }
-        } else {
-            consecutive_empty = 0;
-            if !result.is_empty() {
-                result.push('\n');
-            }
-            result.push_str(line);
-        }
-    }
-    result
 }
 
 #[cfg(test)]

@@ -26,13 +26,15 @@ pub fn lint_source(source: &str, file_path: &str, config: &Config) -> Vec<Diagno
     let normalized = normalize_line_endings(source);
     let source = normalized.as_str();
 
-    // Check for inline suppression comments.
-    let suppressed_lines = parse_suppression_comments(source);
-
     // Parse the full language once. Declaration-based rules use the
     // Tree-sitter projection below, and syntax diagnostics reuse this same
     // tree instead of paying for a second parse.
     let syntax_document = syntax::SyntaxDocument::parse(source);
+
+    // Only actual comments in the authoritative tree may suppress diagnostics.
+    // String contents can contain directive text without changing lint policy.
+    let suppressed_lines =
+        parse_suppression_comments_from_document(source, syntax_document.as_ref());
 
     // Tokenize.
     let mut lexer = Lexer::new(source);
@@ -253,65 +255,52 @@ impl Suppressions {
 ///    diagnostic in the file, regardless of line. Anywhere in the file
 ///    works; convention is at the top so it's visible to readers.
 fn parse_suppression_comments(source: &str) -> Suppressions {
+    let document = syntax::SyntaxDocument::parse(source);
+    parse_suppression_comments_from_document(source, document.as_ref())
+}
+
+fn parse_suppression_comments_from_document(
+    source: &str,
+    document: Option<&syntax::SyntaxDocument<'_>>,
+) -> Suppressions {
     let mut suppressions = Suppressions::default();
-    let file_prefix = "# gdstyle:ignore-file";
-    let line_prefix = "# gdstyle:ignore";
+    let Some(document) = document else {
+        return suppressions;
+    };
 
-    for (i, line) in source.lines().enumerate() {
-        let line_num = i + 1;
-        let trimmed = line.trim();
-
-        // File-scope check must come BEFORE the per-line check because
-        // `# gdstyle:ignore` is a prefix of `# gdstyle:ignore-file` and
-        // would otherwise match first and steal the directive.
-        if let Some(rest) = trimmed.strip_prefix(file_prefix) {
-            if directive_terminator_ok(rest) {
-                let rules = parse_suppression_rules(rest);
-                suppressions.file_level.push(rules);
-                continue;
-            }
-        }
-        if let Some(pos) = line.find(file_prefix) {
-            let rest = &line[pos + file_prefix.len()..];
-            if directive_terminator_ok(rest) {
-                let rules = parse_suppression_rules(rest);
-                suppressions.file_level.push(rules);
-                // An inline file-level directive on a code line behaves
-                // identically to a standalone one; we don't ALSO record
-                // a per-line suppression for that line.
-                continue;
-            }
-        }
-
-        // Standalone per-line suppression: applies to the NEXT line.
-        if let Some(rest) = trimmed.strip_prefix(line_prefix) {
-            if directive_terminator_ok(rest) {
-                let rules = parse_suppression_rules(rest);
-                suppressions
-                    .per_line
-                    .entry(line_num + 1)
-                    .or_default()
-                    .push(rules);
-            }
-        }
-
-        // Inline per-line suppression: applies to the SAME line.
-        if let Some(pos) = line.find(line_prefix) {
-            let before = line[..pos].trim();
-            if !before.is_empty() {
-                let rest = &line[pos + line_prefix.len()..];
+    fn visit(node: tree_sitter::Node<'_>, source: &str, suppressions: &mut Suppressions) {
+        if node.kind() == "comment" {
+            let comment = source[node.byte_range()].trim_end();
+            // File scope must come first: `ignore` is a prefix of `ignore-file`.
+            if let Some(rest) = comment.strip_prefix("# gdstyle:ignore-file") {
                 if directive_terminator_ok(rest) {
-                    let rules = parse_suppression_rules(rest);
+                    suppressions.file_level.push(parse_suppression_rules(rest));
+                }
+                return;
+            }
+            if let Some(rest) = comment.strip_prefix("# gdstyle:ignore") {
+                if directive_terminator_ok(rest) {
+                    let line_start = source[..node.start_byte()]
+                        .rfind('\n')
+                        .map_or(0, |index| index + 1);
+                    let standalone = source[line_start..node.start_byte()].trim().is_empty();
+                    let line = node.start_position().row + 1 + usize::from(standalone);
                     suppressions
                         .per_line
-                        .entry(line_num)
+                        .entry(line)
                         .or_default()
-                        .push(rules);
+                        .push(parse_suppression_rules(rest));
                 }
             }
+            return;
+        }
+        let mut cursor = node.walk();
+        for child in node.named_children(&mut cursor) {
+            visit(child, source, suppressions);
         }
     }
 
+    visit(document.root_node(), source, &mut suppressions);
     suppressions
 }
 

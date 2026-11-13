@@ -164,9 +164,6 @@ pub(crate) fn run_all_rules_with_document(
     if config.is_rule_enabled("quality/max-parameters") {
         quality::check_max_parameters(file, config, &mut diagnostics);
     }
-    if config.is_rule_enabled("quality/unnecessary-pass") {
-        quality::check_unnecessary_pass_in_functions(file, &mut diagnostics);
-    }
     if config.is_rule_enabled("quality/no-debug-print") {
         quality::check_no_debug_print(tokens, file, &mut diagnostics);
     }
@@ -202,31 +199,14 @@ pub(crate) fn run_all_rules_with_document(
             quality::check_no_else_return_with_document(file, document, &mut diagnostics);
         }
     }
-    if config.is_rule_enabled("quality/unreachable-code") {
-        quality::check_unreachable_code(file, &mut diagnostics);
-    }
-    if config.is_rule_enabled("quality/await-in-loop") {
-        quality::check_await_in_loop(file, &mut diagnostics);
-    }
-    if config.is_rule_enabled("quality/allocation-in-loop") {
-        quality::check_allocation_in_loop(file, &mut diagnostics);
-    }
     if config.is_rule_enabled("quality/process-get-node") {
         if let Some(document) = document {
             quality::check_process_get_node_with_document(file, document, &mut diagnostics);
         }
     }
-    if config.is_rule_enabled("quality/max-nesting-depth") {
-        quality::check_max_nesting_depth(file, config, &mut diagnostics);
-    }
-    if config.is_rule_enabled("quality/max-returns") {
-        quality::check_max_returns(file, config, &mut diagnostics);
-    }
-    if config.is_rule_enabled("quality/max-branches") {
-        quality::check_max_branches(file, config, &mut diagnostics);
-    }
-    if config.is_rule_enabled("quality/max-local-variables") {
-        quality::check_max_local_variables(file, config, &mut diagnostics);
+
+    if let Some(document) = document {
+        quality::check_structural_quality(file, config, document, None, &mut diagnostics);
     }
 
     // Sort diagnostics by line number.

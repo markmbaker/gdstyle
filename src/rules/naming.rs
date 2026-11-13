@@ -524,11 +524,9 @@ fn is_state_adjective(word: &str) -> bool {
     state_adjectives().contains(word)
 }
 
-/// Check that private members (funcs/vars starting with _) are actually private pattern.
+/// Check that underscore-prefixed variables in every class stay hidden from the inspector.
 pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<Diagnostic>) {
-    // This rule checks that functions/vars starting with _ don't have @export.
-    // It's more of a convention check.
-    for member in &file.members {
+    for_each_member(&file.members, |member| {
         if let ClassMember::Variable {
             name,
             annotations,
@@ -552,7 +550,7 @@ pub fn check_private_underscore_prefix(file: &ScriptFile, diagnostics: &mut Vec<
                 ));
             }
         }
-    }
+    });
 }
 
 /// Check that $NodePath references use PascalCase.
